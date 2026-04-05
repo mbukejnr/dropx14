@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Test Interface</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .tab {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #ddd;
+        }
+        
+        .tab button {
+            padding: 10px 20px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 5px;
+        }
+        
+        .tab button.active {
+            background: #007bff;
+            color: white;
+            border-radius: 5px 5px 0 0;
+        }
+        
+        .form-section {
+            display: none;
+        }
+        
+        .form-section.active {
+            display: block;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        
+        input, select, textarea {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        
+        button[type="submit"] {
+            background: #28a745;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        
+        button[type="submit"]:hover {
+            background: #218838;
+        }
+        
+        .response {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 5px;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .error {
+            color: #dc3545;
+            padding: 10px;
+            background: #f8d7da;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        
+        .success {
+            color: #155724;
+            padding: 10px;
+            background: #d4edda;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        
+        .api-url {
+            background: #e9ecef;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>API Test Interface</h1>
+        
+        <div class="tab">
+            <button onclick="showTab('login')" class="active">Login</button>
+            <button onclick="showTab('register')">Register</button>
+            <button onclick="showTab('checkAuth')">Check Auth</button>
+            <button onclick="showTab('updateProfile')">Update Profile</button>
+            <button onclick="showTab('changePassword')">Change Password</button>
+            <button onclick="showTab('forgotPassword')">Forgot Password</button>
+            <button onclick="showTab('logout')">Logout</button>
+        </div>
+        
+        <!-- API URL Display -->
+        <div class="api-url" id="apiUrl">API URL: Loading...</div>
+        
+        <!-- Login Form -->
+        <div id="login" class="form-section active">
+            <h2>Login User</h2>
+            <form onsubmit="login(event)">
+                <div class="form-group">
+                    <label>Email or Phone:</label>
+                    <input type="text" id="loginIdentifier" placeholder="email@example.com or +1234567890" required>
+                </div>
+                <div class="form-group">
+                    <label>Password:</label>
+                    <input type="password" id="loginPassword" required>
+                </div>
+                <button type="submit">Login</button>
+            </form>
+        </div>
+        
+        <!-- Register Form -->
+        <div id="register" class="form-section">
+            <h2>Register User</h2>
+            <form onsubmit="register(event)">
+                <div class="form-group">
+                    <label>Full Name:</label>
+                    <input type="text" id="registerFullName" required>
+                </div>
+                <div class="form-group">
+                    <label>Email:</label>
+                    <input type="email" id="registerEmail" required>
+                </div>
+                <div class="form-group">
+                    <label>Phone (optional):</label>
+                    <input type="text" id="registerPhone" placeholder="+1234567890">
+                </div>
+                <div class="form-group">
+                    <label>Password:</label>
+                    <input type="password" id="registerPassword" required minlength="6">
+                </div>
+                <div class="form-group">
+                    <label>Address:</label>
+                    <input type="text" id="registerAddress">
+                </div>
+                <div class="form-group">
+                    <label>City:</label>
+                    <input type="text" id="registerCity">
+                </div>
+                <div class="form-group">
+                    <label>Gender:</label>
+                    <select id="registerGender">
+                        <option value="">Select Gender</option>
+                        <option value="male">Male</option>
+                        <option value="female">Female</option>
+                        <option value="other">Other</option>
+                    </select>
+                </div>
+                <button type="submit">Register</button>
+            </form>
+        </div>
+        
+        <!-- Check Auth -->
+        <div id="checkAuth" class="form-section">
+            <h2>Check Authentication</h2>
+            <p>Check if user is logged in and get profile data.</p>
+            <button onclick="checkAuth()">Check Auth Status</button>
+        </div>
+        
+        <!-- Update Profile -->
+        <div id="updateProfile" class="form-section">
+            <h2>Update Profile</h2>
+            <form onsubmit="updateProfile(event)">
+                <div class="form-group">
+                    <label>Full Name:</label>
+                    <input type="text" id="updateFullName" required>
+                </div>
+                <div class="form-group">
+                    <label>Email:</label>
+                    <input type="email" id="updateEmail" required>
+                </div>
+                <div class="form-group">
+                    <label>Phone:</label>
+                    <input type="text" id="updatePhone" placeholder="+1234567890">
+                </div>
+                <div class="form-group">
+                    <label>Address:</label>
+                    <input type="text" id="updateAddress">
+                </div>
+                <div class="form-group">
+                    <label>City:</label>
+                    <input type="text" id="updateCity">
+                </div>
+                <button type="submit">Update Profile</button>
+            </form>
+        </div>
+        
+        <!-- Change Password -->
+        <div id="changePassword" class="form-section">
+            <h2>Change Password</h2>
+            <form onsubmit="changePassword(event)">
+                <div class="form-group">
+                    <label>Current Password:</label>
+                    <input type="password" id="currentPassword" required>
+                </div>
+                <div class="form-group">
+                    <label>New Password:</label>
+                    <input type="password" id="newPassword" required minlength="6">
+                </div>
+                <div class="form-group">
+                    <label>Confirm New Password:</label>
+                    <input type="password" id="confirmPassword" required minlength="6">
+                </div>
+                <button type="submit">Change Password</button>
+            </form>
+        </div>
+        
+        <!-- Forgot Password -->
+        <div id="forgotPassword" class="form-section">
+            <h2>Forgot Password</h2>
+            <form onsubmit="forgotPassword(event)">
+                <div class="form-group">
+                    <label>Email or Phone:</label>
+                    <input type="text" id="forgotIdentifier" placeholder="email@example.com or +1234567890" required>
+                </div>
+                <button type="submit">Send Reset Instructions</button>
+            </form>
+        </div>
+        
+        <!-- Logout -->
+        <div id="logout" class="form-section">
+            <h2>Logout</h2>
+            <p>End the current session.</p>
+            <button onclick="logout()">Logout</button>
+        </div>
+        
+        <!-- Response Display -->
+        <div id="response" class="response"></div>
+        <div id="message"></div>
+        
+        <!-- Session Info -->
+        <div id="sessionInfo" style="margin-top: 20px; padding: 10px; background: #e9ecef; border-radius: 4px;"></div>
+    </div>
+
+    <script>
+        // Set API URL dynamically
+        const apiUrl = window.location.origin + '/api/users/';
+        document.getElementById('apiUrl').textContent = 'API URL: ' + apiUrl;
+        
+        // Tab navigation
+        function showTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.form-section').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Remove active class from all buttons
+            document.querySelectorAll('.tab button').forEach(button => {
+                button.classList.remove('active');
+            });
+            
+            // Show selected tab
+            document.getElementById(tabName).classList.add('active');
+            
+            // Activate button
+            event.target.classList.add('active');
+            
+            // Clear previous responses
+            clearResponse();
+        }
+        
+        // Display response
+        function displayResponse(data) {
+            const responseDiv = document.getElementById('response');
+            responseDiv.textContent = JSON.stringify(data, null, 2);
+        }
+        
+        // Display message
+        function displayMessage(message, type = 'success') {
+            const messageDiv = document.getElementById('message');
+            messageDiv.innerHTML = `<div class="${type}">${message}</div>`;
+        }
+        
+        // Clear response
+        function clearResponse() {
+            document.getElementById('response').textContent = '';
+            document.getElementById('message').innerHTML = '';
+        }
+        
+        // Update session info
+        function updateSessionInfo() {
+            const sessionDiv = document.getElementById('sessionInfo');
+            const cookies = document.cookie;
+            sessionDiv.innerHTML = `<strong>Session Cookies:</strong><br>${cookies || 'No session cookies found'}`;
+        }
+        
+        // API call function
+        async function callApi(endpoint, data = null, method = 'POST') {
+            const options = {
+                method: method,
+                credentials: 'include', // Important for sessions
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            };
+            
+            if (data && method === 'POST') {
+                options.body = JSON.stringify(data);
+            }
+            
+            try {
+                const response = await fetch(apiUrl, options);
+                const result = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(result.message || 'API request failed');
+                }
+                
+                return result;
+            } catch (error) {
+                throw error;
+            }
+        }
+        
+        // Login function
+        async function login(event) {
+            event.preventDefault();
+            clearResponse();
+            
+            const data = {
+                action: 'login',
+                identifier: document.getElementById('loginIdentifier').value,
+                password: document.getElementById('loginPassword').value
+            };
+            
+            try {
+                const result = await callApi('', data);
+                displayResponse(result);
+                displayMessage(result.message || 'Login successful!');
+                updateSessionInfo();
+                
+                // Auto-populate update form with user data
+                if (result.user) {
+                    document.getElementById('updateFullName').value = result.user.full_name || '';
+                    document.getElementById('updateEmail').value = result.user.email || '';
+                    document.getElementById('updatePhone').value = result.user.phone || '';
+                    document.getElementById('updateAddress').value = result.user.address || '';
+                    document.getElementById('updateCity').value = result.user.city || '';
+                }
+            } catch (error) {
+                displayMessage(error.message, 'error');
+            }
+        }
+        
+        // Register function
+        async function register(event) {
+            event.preventDefault();
+            clearResponse();
+            
+            const data = {
+                action: 'register',
+                full_name: document.getElementById('registerFullName').value,
+                email: document.getElementById('registerEmail').value,
+                phone: document.getElementById('registerPhone').value,
+                password: document.getElementById('registerPassword').value,
+                address: document.getElementById('registerAddress').value,
+                city: document.getElementById('registerCity').value,
+                gender: document.getElementById('registerGender').value
+            };
+            
+            try {
+                const result = await callApi('', data);
+                displayResponse(result);
+                displayMessage(result.message || 'Registration successful!');
+                updateSessionInfo();
+                
+                // Switch to login tab with pre-filled data
+                showTab('login');
+                document.getElementById('loginIdentifier').value = data.email;
+                document.getElementById('loginPassword').value = data.password;
+            } catch (error) {
+                displayMessage(error.message, 'error');
+            }
+        }
+        
+        // Check authentication
+        async function checkAuth() {
+            clearResponse();
+            
+            try {
+                const response = await fetch(apiUrl, {
+                    method: 'GET',
+                    credentials: 'include'
+                });
+                
+                const result = await response.json();
+                displayResponse(result);
+                
+                if (result.authenticated) {
+                    displayMessage('User is authenticated!', 'success');
+                } else {
+                    displayMessage('User is not authenticated', 'error');
+                }
+                
+                updateSessionInfo();
+            } catch (error) {
+                displayMessage(error.message, 'error');
+            }
+        }
+        
+        // Update profile
+        async function updateProfile(event) {
+            event.preventDefault();
+            clearResponse();
+            
+            const data = {
+                action: 'update_profile',
+                full_name: document.getElementById('updateFullName').value,
+                email: document.getElementById('updateEmail').value,
+                phone: document.getElementById('updatePhone').value,
+                address: document.getElementById('updateAddress').value,
+                city: document.getElementById('updateCity').value
+            };
+            
+            try {
+                const result = await callApi('', data);
+                displayResponse(result);
+                displayMessage(result.message || 'Profile updated successfully!');
+            } catch (error) {
+                displayMessage(error.message, 'error');
+            }
+        }
+        
+        // Change password
+        async function changePassword(event) {
+            event.preventDefault();
+            clearResponse();
+            
+            const data = {
+                action: 'change_password',
+                current_password: document.getElementById('currentPassword').value,
+                new_password: document.getElementById('newPassword').value,
+                confirm_password: document.getElementById('confirmPassword').value
+            };
+            
+            try {
+                const result = await callApi('', data);
+                displayResponse(result);
+                displayMessage(result.message || 'Password changed successfully!');
+            } catch (error) {
+                displayMessage(error.message, 'error');
+            }
+        }
+        
+        // Forgot password
+        async function forgotPassword(event) {
+            event.preventDefault();
+            clearResponse();
+            
+            const data = {
+                action: 'forgot_password',
+                identifier: document.getElementById('forgotIdentifier').value
+            };
+            
+            try {
+                const result = await callApi('', data);
+                displayResponse(result);
+                displayMessage(result.message || 'Reset instructions sent!');
+            } catch (error) {
+                displayMessage(error.message, 'error');
+            }
+        }
+        
+        // Logout
+        async function logout() {
+            clearResponse();
+            
+            try {
+                const result = await callApi('', { action: 'logout' });
+                displayResponse(result);
+                displayMessage(result.message || 'Logged out successfully!');
+                updateSessionInfo();
+            } catch (error) {
+                displayMessage(error.message, 'error');
+            }
+        }
+        
+        // Initialize
+        updateSessionInfo();
+    </script>
+</body>
+</html>
