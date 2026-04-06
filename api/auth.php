@@ -31,92 +31,221 @@ if (session_status() === PHP_SESSION_NONE) {
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../includes/ResponseHandler.php';
 
-/*********************************
- * FIREBASE CONFIGURATION
- * Install: composer require firebase/php-jwt
- *********************************/
+// Load Composer dependencies
 require_once __DIR__ . '/../vendor/autoload.php';
 
-use Firebase\JWT\JWT;
-use Firebase\JWT\Key;
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\SMTP;
+use PHPMailer\PHPMailer\Exception;
 
-// Firebase Project ID - REPLACE WITH YOUR ACTUAL FIREBASE PROJECT ID
-$firebaseProjectId = 'dropxdelivery-80';
+/*********************************
+ * EMAIL CONFIGURATION (SMTP)
+ *********************************/
+// Using Gmail SMTP - REPLACE WITH YOUR CREDENTIALS
+$smtpHost = 'smtp.gmail.com';
+$smtpPort = 587;
+$smtpUser = 'www.framkmwakasungula@gmail.com'; // REPLACE WITH YOUR EMAIL
+$smtpPassword = 'cwwn gdbh vdbh ntct'; // REPLACE WITH YOUR APP PASSWORD
+$smtpFromEmail = 'noreply@dropx.com';
+$smtpFromName = 'DropX Delivery';
 
-// Get Firebase public keys from Google
-function getFirebasePublicKeys() {
-    $keysUrl = "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
-    $keysJson = @file_get_contents($keysUrl);
-    if ($keysJson === false) {
-        return null;
+/*********************************
+ * SMS CONFIGURATION (Africa's Talking - Malawi)
+ *********************************/
+$africastalkingUsername = 'sandbox'; // Keep as 'sandbox' for testing
+$africastalkingApiKey = 'atsk_b89e1c9fec477b56cf6ce2f1b3755d4961605dbacd3bf43c0b1f108d4085089137eda572'; // REPLACE WITH YOUR ACTUAL API KEY
+$africastalkingFrom = 'DropX'; // Sender ID (max 11 characters)
+
+/*********************************
+ * SEND EMAIL USING PHPMailer
+ *********************************/
+function sendEmailVerificationCode($email, $code) {
+    global $smtpHost, $smtpPort, $smtpUser, $smtpPassword, $smtpFromEmail, $smtpFromName;
+    
+    // For development/testing - log the code
+    error_log("📧 VERIFICATION CODE FOR $email: $code");
+    
+    // Check if SMTP is configured
+    if ($smtpUser === 'your-email@gmail.com' || empty($smtpUser)) {
+        error_log("SMTP not configured. Please update email credentials.");
+        return false;
     }
-    return json_decode($keysJson, true);
+    
+    $mail = new PHPMailer(true);
+    
+    try {
+        // Server settings
+        $mail->isSMTP();
+        $mail->Host       = $smtpHost;
+        $mail->SMTPAuth   = true;
+        $mail->Username   = $smtpUser;
+        $mail->Password   = $smtpPassword;
+        $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
+        $mail->Port       = $smtpPort;
+        
+        // Recipients
+        $mail->setFrom($smtpFromEmail, $smtpFromName);
+        $mail->addAddress($email);
+        
+        // Content
+        $mail->isHTML(true);
+        $mail->Subject = 'Verify Your Email - DropX';
+        
+        $mail->Body = '
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Email Verification</title>
+            <style>
+                body { font-family: Arial, sans-serif; background-color: #f5f5f5; margin: 0; padding: 0; }
+                .container { max-width: 600px; margin: 20px auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                .header { background-color: #44A3E3; padding: 30px; text-align: center; }
+                .header h1 { color: #ffffff; margin: 0; font-size: 28px; }
+                .content { padding: 40px 30px; text-align: center; }
+                .code { font-size: 48px; font-weight: bold; color: #44A3E3; letter-spacing: 10px; background-color: #f0f7ff; padding: 20px; border-radius: 10px; margin: 20px 0; font-family: monospace; }
+                .message { color: #666666; line-height: 1.6; margin-bottom: 30px; }
+                .footer { background-color: #f9f9f9; padding: 20px; text-align: center; color: #999999; font-size: 12px; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>DropX</h1>
+                </div>
+                <div class="content">
+                    <h2>Verify Your Email Address</h2>
+                    <p class="message">Thank you for registering with DropX. Please use the verification code below to complete your registration.</p>
+                    <div class="code">' . $code . '</div>
+                    <p class="message">This code will expire in <strong>5 minutes</strong>.<br>If you didn\'t request this, please ignore this email.</p>
+                </div>
+                <div class="footer">
+                    &copy; ' . date('Y') . ' DropX. All rights reserved.
+                </div>
+            </div>
+        </body>
+        </html>
+        ';
+        
+        $mail->AltBody = "Your DropX verification code is: $code\n\nThis code will expire in 5 minutes.\n\nNever share this code with anyone.";
+        
+        $mail->send();
+        error_log("Email sent successfully to $email");
+        return true;
+        
+    } catch (Exception $e) {
+        error_log("Email failed to send to $email: {$mail->ErrorInfo}");
+        return false;
+    }
 }
 
 /*********************************
- * VERIFY FIREBASE TOKEN
+ * SEND SMS USING AFRICA'S TALKING
  *********************************/
-function verifyFirebaseToken($idToken) {
-    global $firebaseProjectId;
+function sendSmsVerificationCode($phone, $code) {
+    global $africastalkingUsername, $africastalkingApiKey, $africastalkingFrom;
     
-    if (empty($idToken)) {
-        return null;
+    // For development/testing - log the code
+    error_log("📱 SMS VERIFICATION CODE FOR $phone: $code");
+    
+    // Check if Africa's Talking is configured
+    if (empty($africastalkingApiKey) || $africastalkingApiKey === 'YOUR_API_KEY_HERE') {
+        error_log("Africa's Talking not configured. Please update SMS credentials.");
+        return false;
     }
     
-    try {
-        // Get Firebase public keys
-        $keys = getFirebasePublicKeys();
-        if (!$keys) {
-            error_log("Failed to fetch Firebase public keys");
-            return null;
-        }
-        
-        // Decode without verification first to get the key ID
-        $tks = explode('.', $idToken);
-        if (count($tks) != 3) {
-            return null;
-        }
-        
-        $header = json_decode(JWT::urlsafeB64Decode($tks[0]), true);
-        if (!isset($header['kid'])) {
-            return null;
-        }
-        
-        // Get the specific public key
-        $publicKey = $keys[$header['kid']] ?? null;
-        if (!$publicKey) {
-            error_log("Public key not found for kid: " . $header['kid']);
-            return null;
-        }
-        
-        // Verify the token
-        $decoded = JWT::decode($idToken, new Key($publicKey, 'RS256'));
-        
-        // Verify issuer
-        $expectedIssuer = "https://securetoken.google.com/$firebaseProjectId";
-        if ($decoded->iss !== $expectedIssuer) {
-            error_log("Invalid issuer: " . $decoded->iss);
-            return null;
-        }
-        
-        // Verify audience
-        if ($decoded->aud !== $firebaseProjectId) {
-            error_log("Invalid audience: " . $decoded->aud);
-            return null;
-        }
-        
-        // Check expiration
-        if ($decoded->exp < time()) {
-            error_log("Token expired");
-            return null;
-        }
-        
-        return $decoded;
-        
-    } catch (Exception $e) {
-        error_log("Firebase token verification failed: " . $e->getMessage());
-        return null;
+    // Format phone number for Malawi
+    $formattedPhone = formatPhoneNumberForMalawi($phone);
+    
+    // Africa's Talking API endpoint (Sandbox)
+    $url = 'https://api.sandbox.africastalking.com/version1/messaging';
+    
+    $data = [
+        'username' => $africastalkingUsername,
+        'to' => $formattedPhone,
+        'message' => "DropX Verification\n\nYour verification code is: $code\n\nThis code will expire in 5 minutes.\n\nNever share this code with anyone.",
+        'from' => $africastalkingFrom
+    ];
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'ApiKey: ' . $africastalkingApiKey,
+        'Content-Type: application/x-www-form-urlencoded',
+        'Accept: application/json'
+    ]);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+    
+    if ($curlError) {
+        error_log("CURL Error: $curlError");
+        return false;
     }
+    
+    if ($httpCode === 201 || $httpCode === 200) {
+        $result = json_decode($response, true);
+        if (isset($result['SMSMessageData']['Recipients'][0]['status']) && 
+            $result['SMSMessageData']['Recipients'][0]['status'] === 'Success') {
+            error_log("SMS sent successfully to $phone");
+            return true;
+        } else {
+            error_log("SMS API returned error: " . print_r($result, true));
+            return false;
+        }
+    } else {
+        error_log("SMS failed for $phone. HTTP Code: $httpCode, Response: $response");
+        return false;
+    }
+}
+
+/*********************************
+ * FORMAT PHONE NUMBER FOR MALAWI
+ *********************************/
+function formatPhoneNumberForMalawi($phone) {
+    // Remove all non-numeric characters except '+'
+    $phone = preg_replace('/[^0-9+]/', '', $phone);
+    
+    // If phone already has +, assume it's properly formatted
+    if (substr($phone, 0, 1) === '+') {
+        return $phone;
+    }
+    
+    // Remove leading zero if present
+    $phone = ltrim($phone, '0');
+    
+    // If phone is 9 digits (Malawi local)
+    if (strlen($phone) === 9) {
+        return '+265' . $phone;
+    }
+    
+    // If phone is 12 digits starting with 265
+    if (strlen($phone) === 12 && substr($phone, 0, 3) === '265') {
+        return '+' . $phone;
+    }
+    
+    // Default: add Malawi code
+    return '+265' . $phone;
+}
+
+/*********************************
+ * CLEAN PHONE NUMBER
+ *********************************/
+function cleanPhoneNumber($phone) {
+    $phone = trim($phone);
+    $hasPlus = substr($phone, 0, 1) === '+';
+    $digits = preg_replace('/\D/', '', $phone);
+    
+    if ($hasPlus) {
+        return '+' . $digits;
+    }
+    
+    return $digits;
 }
 
 /*********************************
@@ -148,7 +277,7 @@ function handleGetRequest() {
             "SELECT id, full_name, email, phone, gender, avatar,
                     member_level, member_points, total_orders, login_method,
                     rating, verified, member_since, created_at, updated_at,
-                    email_verified, phone_verified, firebase_uid
+                    email_verified, phone_verified
              FROM users WHERE id = :id"
         );
         $stmt->execute([':id' => $_SESSION['user_id']]);
@@ -167,21 +296,12 @@ function handleGetRequest() {
 }
 
 /*********************************
- * POST ROUTER - Firebase Phone & Email Authentication
+ * POST ROUTER
  *********************************/
 function handlePostRequest() {
     $db = new Database();
     $conn = $db->getConnection();
 
-    // Get authorization header for Firebase token
-    $headers = getallheaders();
-    $authHeader = $headers['Authorization'] ?? $_SERVER['HTTP_AUTHORIZATION'] ?? '';
-    $firebaseToken = '';
-    
-    if (preg_match('/Bearer\s(\S+)/', $authHeader, $matches)) {
-        $firebaseToken = $matches[1];
-    }
-    
     $input = json_decode(file_get_contents('php://input'), true);
     if (!$input) {
         $input = $_POST;
@@ -190,28 +310,7 @@ function handlePostRequest() {
     $action = $input['action'] ?? '';
 
     switch ($action) {
-        // Firebase Authentication (Phone & Email)
-        case 'firebase_login':
-        case 'firebase_verify':
-            firebaseLogin($conn, $input, $firebaseToken);
-            break;
-        
-        // Firebase Email/Password Login
-        case 'firebase_email_login':
-            firebaseEmailLogin($conn, $input, $firebaseToken);
-            break;
-        
-        // Firebase Phone Login (OTP via SMS)
-        case 'firebase_phone_login':
-            firebasePhoneLogin($conn, $input, $firebaseToken);
-            break;
-        
-        // Firebase Register (creates user in Firebase)
-        case 'firebase_register':
-            firebaseRegister($conn, $input, $firebaseToken);
-            break;
-        
-        // Legacy email/password (fallback for existing users)
+        // Authentication
         case 'login':
             loginUser($conn, $input);
             break;
@@ -220,6 +319,30 @@ function handlePostRequest() {
             break;
         case 'logout':
             logoutUser();
+            break;
+        
+        // Email Verification Actions
+        case 'send_email_verification':
+        case 'resend_email_verification':
+            sendEmailVerification($conn, $input);
+            break;
+        case 'verify_email':
+            verifyEmail($conn, $input);
+            break;
+        case 'check_email_verification_status':
+            checkEmailVerificationStatus($conn, $input);
+            break;
+        
+        // Phone Verification Actions
+        case 'send_phone_verification':
+        case 'resend_phone_verification':
+            sendPhoneVerification($conn, $input);
+            break;
+        case 'verify_phone':
+            verifyPhone($conn, $input);
+            break;
+        case 'check_phone_verification_status':
+            checkPhoneVerificationStatus($conn, $input);
             break;
         
         // Profile Management
@@ -250,277 +373,7 @@ function handlePostRequest() {
 }
 
 /*********************************
- * FIREBASE LOGIN - Universal Firebase Auth Handler
- *********************************/
-function firebaseLogin($conn, $data, $firebaseToken) {
-    // If token not in header, check in data
-    $idToken = $firebaseToken ?: ($data['firebase_token'] ?? '');
-    
-    if (empty($idToken)) {
-        ResponseHandler::error('Firebase token is required', 400);
-    }
-    
-    // Verify Firebase token
-    $firebaseUser = verifyFirebaseToken($idToken);
-    
-    if (!$firebaseUser) {
-        ResponseHandler::error('Invalid or expired Firebase token', 401);
-    }
-    
-    // Extract user info from Firebase token
-    $firebaseUid = $firebaseUser->sub;
-    $email = $firebaseUser->email ?? $data['email'] ?? '';
-    $phone = $firebaseUser->phone_number ?? $data['phone'] ?? '';
-    $name = $data['full_name'] ?? $data['name'] ?? '';
-    $emailVerified = $firebaseUser->email_verified ?? false;
-    $phoneVerified = isset($firebaseUser->phone_number) ? true : false;
-    
-    // Determine login method
-    $loginMethod = !empty($phone) ? 'phone' : 'email';
-    
-    // Find or create user
-    $user = findOrCreateFirebaseUser($conn, $firebaseUid, $email, $phone, $name, $emailVerified, $phoneVerified, $loginMethod);
-    
-    if (!$user) {
-        ResponseHandler::error('Failed to authenticate user', 500);
-    }
-    
-    // Set session
-    $_SESSION['user_id'] = $user['id'];
-    $_SESSION['logged_in'] = true;
-    $_SESSION['firebase_uid'] = $firebaseUid;
-    
-    // Update last login
-    $conn->prepare("UPDATE users SET last_login = NOW() WHERE id = :id")
-         ->execute([':id' => $user['id']]);
-    
-    ResponseHandler::success([
-        'user' => formatUserData($conn, $user),
-        'firebase_uid' => $firebaseUid
-    ], 'Login successful');
-}
-
-/*********************************
- * FIREBASE EMAIL LOGIN
- *********************************/
-function firebaseEmailLogin($conn, $data, $firebaseToken) {
-    // Firebase handles email/password authentication
-    // The mobile app calls Firebase Auth, then sends the token here
-    firebaseLogin($conn, $data, $firebaseToken);
-}
-
-/*********************************
- * FIREBASE PHONE LOGIN (OTP via SMS)
- *********************************/
-function firebasePhoneLogin($conn, $data, $firebaseToken) {
-    // Firebase handles phone OTP verification
-    // Steps:
-    // 1. App sends phone number to Firebase
-    // 2. Firebase sends OTP via SMS
-    // 3. User enters OTP in app
-    // 4. Firebase verifies and returns a token
-    // 5. App sends token to this endpoint
-    firebaseLogin($conn, $data, $firebaseToken);
-}
-
-/*********************************
- * FIREBASE REGISTER - Create user in Firebase and local DB
- *********************************/
-function firebaseRegister($conn, $data, $firebaseToken) {
-    // If user just registered via Firebase, they'll have a token
-    $idToken = $firebaseToken ?: ($data['firebase_token'] ?? '');
-    
-    if (empty($idToken)) {
-        ResponseHandler::error('Firebase token is required', 400);
-    }
-    
-    // Verify Firebase token
-    $firebaseUser = verifyFirebaseToken($idToken);
-    
-    if (!$firebaseUser) {
-        ResponseHandler::error('Invalid or expired Firebase token', 401);
-    }
-    
-    $firebaseUid = $firebaseUser->sub;
-    $email = $firebaseUser->email ?? $data['email'] ?? '';
-    $phone = $firebaseUser->phone_number ?? $data['phone'] ?? '';
-    $fullName = trim($data['full_name'] ?? '');
-    $gender = $data['gender'] ?? null;
-    
-    // Validate required fields
-    if (!$fullName) {
-        ResponseHandler::error('Full name is required', 400);
-    }
-    
-    // Determine login method
-    $loginMethod = !empty($phone) ? 'phone' : 'email';
-    
-    if ($loginMethod === 'email' && empty($email)) {
-        ResponseHandler::error('Email is required', 400);
-    }
-    
-    if ($loginMethod === 'phone' && empty($phone)) {
-        ResponseHandler::error('Phone number is required', 400);
-    }
-    
-    // Check if user already exists
-    $checkSql = "SELECT id FROM users WHERE firebase_uid = :uid OR ";
-    $params = [':uid' => $firebaseUid];
-    
-    if ($email && $phone) {
-        $checkSql .= "email = :email OR phone = :phone";
-        $params[':email'] = $email;
-        $params[':phone'] = $phone;
-    } else if ($email) {
-        $checkSql .= "email = :email";
-        $params[':email'] = $email;
-    } else if ($phone) {
-        $checkSql .= "phone = :phone";
-        $params[':phone'] = $phone;
-    }
-    
-    $check = $conn->prepare($checkSql);
-    $check->execute($params);
-    
-    if ($check->rowCount() > 0) {
-        // User exists, just log them in
-        $stmt = $conn->prepare("SELECT * FROM users WHERE firebase_uid = :uid");
-        $stmt->execute([':uid' => $firebaseUid]);
-        $existingUser = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($existingUser) {
-            $_SESSION['user_id'] = $existingUser['id'];
-            $_SESSION['logged_in'] = true;
-            
-            ResponseHandler::success([
-                'user' => formatUserData($conn, $existingUser)
-            ], 'Welcome back!');
-            return;
-        }
-    }
-    
-    // Create new user
-    $stmt = $conn->prepare(
-        "INSERT INTO users (full_name, email, phone, firebase_uid, login_method, gender,
-                            member_level, member_points, total_orders, rating, 
-                            verified, member_since, created_at, updated_at,
-                            email_verified, phone_verified)
-         VALUES (:full_name, :email, :phone, :firebase_uid, :login_method, :gender,
-                 'basic', 0, 0, 0.00, 1, :member_since, NOW(), NOW(),
-                 :email_verified, :phone_verified)"
-    );
-    
-    $emailVerified = ($loginMethod === 'email') ? 1 : 0;
-    $phoneVerified = ($loginMethod === 'phone') ? 1 : 0;
-    
-    $stmt->execute([
-        ':full_name' => $fullName,
-        ':email' => !empty($email) ? $email : null,
-        ':phone' => !empty($phone) ? $phone : null,
-        ':firebase_uid' => $firebaseUid,
-        ':login_method' => $loginMethod,
-        ':gender' => $gender,
-        ':member_since' => date('M d, Y'),
-        ':email_verified' => $emailVerified,
-        ':phone_verified' => $phoneVerified
-    ]);
-    
-    $userId = $conn->lastInsertId();
-    
-    // Set session
-    $_SESSION['user_id'] = $userId;
-    $_SESSION['logged_in'] = true;
-    
-    // Get the new user
-    $stmt = $conn->prepare(
-        "SELECT id, full_name, email, phone, gender, avatar,
-                 member_level, member_points, total_orders, login_method,
-                 rating, verified, member_since, created_at, updated_at,
-                 email_verified, phone_verified
-         FROM users WHERE id = :id"
-    );
-    $stmt->execute([':id' => $userId]);
-    $user = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    ResponseHandler::success([
-        'user' => formatUserData($conn, $user)
-    ], 'Registration successful', 201);
-}
-
-/*********************************
- * FIND OR CREATE USER FROM FIREBASE DATA
- *********************************/
-function findOrCreateFirebaseUser($conn, $firebaseUid, $email, $phone, $name, $emailVerified, $phoneVerified, $loginMethod) {
-    // Check if user exists by Firebase UID
-    $stmt = $conn->prepare("SELECT * FROM users WHERE firebase_uid = :uid");
-    $stmt->execute([':uid' => $firebaseUid]);
-    $user = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    if ($user) {
-        return $user;
-    }
-    
-    // Check if user exists by email
-    if (!empty($email)) {
-        $stmt = $conn->prepare("SELECT * FROM users WHERE email = :email");
-        $stmt->execute([':email' => $email]);
-        $existingUser = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($existingUser) {
-            // Link Firebase UID to existing account
-            $conn->prepare("UPDATE users SET firebase_uid = :uid, updated_at = NOW() WHERE id = :id")
-                 ->execute([':uid' => $firebaseUid, ':id' => $existingUser['id']]);
-            return $existingUser;
-        }
-    }
-    
-    // Check if user exists by phone
-    if (!empty($phone)) {
-        $stmt = $conn->prepare("SELECT * FROM users WHERE phone = :phone");
-        $stmt->execute([':phone' => $phone]);
-        $existingUser = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($existingUser) {
-            // Link Firebase UID to existing account
-            $conn->prepare("UPDATE users SET firebase_uid = :uid, updated_at = NOW() WHERE id = :id")
-                 ->execute([':uid' => $firebaseUid, ':id' => $existingUser['id']]);
-            return $existingUser;
-        }
-    }
-    
-    // Create new user (auto-register on first login)
-    $fullName = !empty($name) ? $name : (!empty($email) ? explode('@', $email)[0] : 'User');
-    
-    $stmt = $conn->prepare(
-        "INSERT INTO users (full_name, email, phone, firebase_uid, login_method, 
-                            member_level, member_points, total_orders, rating, 
-                            verified, member_since, created_at, updated_at,
-                            email_verified, phone_verified)
-         VALUES (:full_name, :email, :phone, :firebase_uid, :login_method,
-                 'basic', 0, 0, 0.00, 1, :member_since, NOW(), NOW(),
-                 :email_verified, :phone_verified)"
-    );
-    
-    $stmt->execute([
-        ':full_name' => $fullName,
-        ':email' => !empty($email) ? $email : null,
-        ':phone' => !empty($phone) ? $phone : null,
-        ':firebase_uid' => $firebaseUid,
-        ':login_method' => $loginMethod,
-        ':member_since' => date('M d, Y'),
-        ':email_verified' => $emailVerified ? 1 : 0,
-        ':phone_verified' => $phoneVerified ? 1 : 0
-    ]);
-    
-    $userId = $conn->lastInsertId();
-    
-    $stmt = $conn->prepare("SELECT * FROM users WHERE id = :id");
-    $stmt->execute([':id' => $userId]);
-    return $stmt->fetch(PDO::FETCH_ASSOC);
-}
-
-/*********************************
- * LEGACY LOGIN - Email/Password (Fallback for existing users)
+ * LOGIN
  *********************************/
 function loginUser($conn, $data) {
     $identifier = trim($data['identifier'] ?? '');
@@ -569,7 +422,7 @@ function loginUser($conn, $data) {
 }
 
 /*********************************
- * LEGACY REGISTER - Email/Password (Fallback)
+ * REGISTER
  *********************************/
 function registerUser($conn, $data) {
     $fullName = trim($data['full_name'] ?? '');
@@ -627,7 +480,7 @@ function registerUser($conn, $data) {
                             email_verified, phone_verified)
          VALUES (:full_name, :email, :phone, :password, :gender,
                   'basic', 0, 0, :login_method, 0.00, 0, :member_since, NOW(), NOW(),
-                  :email_verified, :phone_verified)"
+                  0, 0)"
     );
     
     $stmt->execute([
@@ -637,9 +490,7 @@ function registerUser($conn, $data) {
         ':password' => password_hash($password, PASSWORD_DEFAULT),
         ':gender' => $gender,
         ':login_method' => $loginMethod,
-        ':member_since' => date('M d, Y'),
-        ':email_verified' => ($loginMethod === 'email') ? 0 : 0,
-        ':phone_verified' => ($loginMethod === 'phone') ? 0 : 0
+        ':member_since' => date('M d, Y')
     ]);
 
     $userId = $conn->lastInsertId();
@@ -660,6 +511,274 @@ function registerUser($conn, $data) {
     ResponseHandler::success([
         'user' => formatUserData($conn, $user)
     ], 'Registration successful', 201);
+}
+
+/*********************************
+ * EMAIL VERIFICATION FUNCTIONS
+ *********************************/
+function checkEmailVerificationStatus($conn, $data) {
+    $email = trim($data['email'] ?? '');
+    
+    if (!$email || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        ResponseHandler::error('Valid email address is required', 400);
+    }
+    
+    $stmt = $conn->prepare("SELECT email_verified FROM users WHERE email = :email");
+    $stmt->execute([':email' => $email]);
+    $user = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    $isVerified = $user ? ($user['email_verified'] == 1) : false;
+    
+    ResponseHandler::success(['is_verified' => $isVerified]);
+}
+
+function sendEmailVerification($conn, $data) {
+    $email = trim($data['email'] ?? '');
+    
+    if (!$email || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        ResponseHandler::error('Valid email address is required', 400);
+    }
+    
+    // Check if user exists
+    $stmt = $conn->prepare("SELECT id, email_verified FROM users WHERE email = :email");
+    $stmt->execute([':email' => $email]);
+    $user = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$user) {
+        ResponseHandler::error('No account found with this email', 404);
+    }
+    
+    if ($user['email_verified'] == 1) {
+        ResponseHandler::error('Email already verified', 400);
+    }
+    
+    // Generate 6-digit code
+    $verificationCode = sprintf("%06d", random_int(0, 999999));
+    $expiresAt = date('Y-m-d H:i:s', time() + 300);
+    
+    // Store in database
+    $stmt = $conn->prepare(
+        "INSERT INTO email_verifications (email, code, expires_at, created_at)
+         VALUES (:email, :code, :expires_at, NOW())
+         ON DUPLICATE KEY UPDATE
+         code = VALUES(code),
+         expires_at = VALUES(expires_at),
+         attempts = 0,
+         created_at = NOW()"
+    );
+    
+    $stmt->execute([
+        ':email' => $email,
+        ':code' => $verificationCode,
+        ':expires_at' => $expiresAt
+    ]);
+    
+    // Send email
+    $emailSent = sendEmailVerificationCode($email, $verificationCode);
+    
+    if (!$emailSent) {
+        ResponseHandler::success([
+            'code' => $verificationCode,
+            'expires_in' => 300
+        ], 'Verification code generated (email sending failed - check logs)');
+        return;
+    }
+    
+    ResponseHandler::success([
+        'expires_in' => 300
+    ], 'Verification code sent to your email');
+}
+
+function verifyEmail($conn, $data) {
+    $email = trim($data['email'] ?? '');
+    $code = $data['verification_code'] ?? '';
+    
+    if (!$email || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        ResponseHandler::error('Valid email address is required', 400);
+    }
+    
+    if (!$code || strlen($code) != 6) {
+        ResponseHandler::error('Valid 6-digit verification code is required', 400);
+    }
+    
+    // Get verification record
+    $stmt = $conn->prepare(
+        "SELECT id, code, expires_at, attempts 
+         FROM email_verifications 
+         WHERE email = :email 
+         ORDER BY created_at DESC 
+         LIMIT 1"
+    );
+    $stmt->execute([':email' => $email]);
+    $verification = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$verification) {
+        ResponseHandler::error('No verification code found. Please request a new code.', 400);
+    }
+    
+    // Check attempts
+    if ($verification['attempts'] >= 5) {
+        $conn->prepare("DELETE FROM email_verifications WHERE email = :email")->execute([':email' => $email]);
+        ResponseHandler::error('Too many failed attempts. Please request a new code.', 400);
+    }
+    
+    // Check expiration
+    if (strtotime($verification['expires_at']) < time()) {
+        $conn->prepare("DELETE FROM email_verifications WHERE email = :email")->execute([':email' => $email]);
+        ResponseHandler::error('Verification code expired. Please request a new code.', 400);
+    }
+    
+    // Verify code
+    if ($verification['code'] !== $code) {
+        $conn->prepare("UPDATE email_verifications SET attempts = attempts + 1 WHERE id = :id")
+              ->execute([':id' => $verification['id']]);
+        
+        $remaining = 5 - ($verification['attempts'] + 1);
+        ResponseHandler::error("Invalid code. $remaining attempts remaining.", 400);
+    }
+    
+    // Update user's email verification status
+    $stmt = $conn->prepare("UPDATE users SET email_verified = 1, updated_at = NOW() WHERE email = :email");
+    $stmt->execute([':email' => $email]);
+    
+    // Delete used verification
+    $conn->prepare("DELETE FROM email_verifications WHERE email = :email")->execute([':email' => $email]);
+    
+    ResponseHandler::success([], 'Email verified successfully');
+}
+
+/*********************************
+ * PHONE VERIFICATION FUNCTIONS
+ *********************************/
+function checkPhoneVerificationStatus($conn, $data) {
+    $phone = cleanPhoneNumber($data['phone'] ?? '');
+    
+    if (!$phone || strlen($phone) < 10) {
+        ResponseHandler::error('Valid phone number is required', 400);
+    }
+    
+    $stmt = $conn->prepare("SELECT phone_verified FROM users WHERE phone = :phone");
+    $stmt->execute([':phone' => $phone]);
+    $user = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    $isVerified = $user ? ($user['phone_verified'] == 1) : false;
+    
+    ResponseHandler::success(['is_verified' => $isVerified]);
+}
+
+function sendPhoneVerification($conn, $data) {
+    $phone = cleanPhoneNumber($data['phone'] ?? '');
+    
+    if (!$phone || strlen($phone) < 10) {
+        ResponseHandler::error('Valid phone number is required', 400);
+    }
+    
+    // Check if user exists
+    $stmt = $conn->prepare("SELECT id, phone_verified FROM users WHERE phone = :phone");
+    $stmt->execute([':phone' => $phone]);
+    $user = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$user) {
+        ResponseHandler::error('No account found with this phone number', 404);
+    }
+    
+    if ($user['phone_verified'] == 1) {
+        ResponseHandler::error('Phone already verified', 400);
+    }
+    
+    // Generate 6-digit code
+    $verificationCode = sprintf("%06d", random_int(0, 999999));
+    $expiresAt = date('Y-m-d H:i:s', time() + 300);
+    
+    // Store in database
+    $stmt = $conn->prepare(
+        "INSERT INTO phone_verifications (phone, code, expires_at, created_at)
+         VALUES (:phone, :code, :expires_at, NOW())
+         ON DUPLICATE KEY UPDATE
+         code = VALUES(code),
+         expires_at = VALUES(expires_at),
+         attempts = 0,
+         created_at = NOW()"
+    );
+    
+    $stmt->execute([
+        ':phone' => $phone,
+        ':code' => $verificationCode,
+        ':expires_at' => $expiresAt
+    ]);
+    
+    // Send SMS
+    $smsSent = sendSmsVerificationCode($phone, $verificationCode);
+    
+    if (!$smsSent) {
+        ResponseHandler::success([
+            'code' => $verificationCode,
+            'expires_in' => 300
+        ], 'Verification code generated (SMS sending failed - check logs)');
+        return;
+    }
+    
+    ResponseHandler::success([
+        'expires_in' => 300
+    ], 'Verification code sent to your phone');
+}
+
+function verifyPhone($conn, $data) {
+    $phone = cleanPhoneNumber($data['phone'] ?? '');
+    $code = $data['verification_code'] ?? '';
+    
+    if (!$phone || strlen($phone) < 10) {
+        ResponseHandler::error('Valid phone number is required', 400);
+    }
+    
+    if (!$code || strlen($code) != 6) {
+        ResponseHandler::error('Valid 6-digit verification code is required', 400);
+    }
+    
+    // Get verification record
+    $stmt = $conn->prepare(
+        "SELECT id, code, expires_at, attempts 
+         FROM phone_verifications 
+         WHERE phone = :phone 
+         ORDER BY created_at DESC 
+         LIMIT 1"
+    );
+    $stmt->execute([':phone' => $phone]);
+    $verification = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$verification) {
+        ResponseHandler::error('No verification code found. Please request a new code.', 400);
+    }
+    
+    // Check attempts
+    if ($verification['attempts'] >= 5) {
+        $conn->prepare("DELETE FROM phone_verifications WHERE phone = :phone")->execute([':phone' => $phone]);
+        ResponseHandler::error('Too many failed attempts. Please request a new code.', 400);
+    }
+    
+    // Check expiration
+    if (strtotime($verification['expires_at']) < time()) {
+        $conn->prepare("DELETE FROM phone_verifications WHERE phone = :phone")->execute([':phone' => $phone]);
+        ResponseHandler::error('Verification code expired. Please request a new code.', 400);
+    }
+    
+    // Verify code
+    if ($verification['code'] !== $code) {
+        $conn->prepare("UPDATE phone_verifications SET attempts = attempts + 1 WHERE id = :id")
+              ->execute([':id' => $verification['id']]);
+        
+        $remaining = 5 - ($verification['attempts'] + 1);
+        ResponseHandler::error("Invalid code. $remaining attempts remaining.", 400);
+    }
+    
+    // Update user's phone verification status
+    $stmt = $conn->prepare("UPDATE users SET phone_verified = 1, updated_at = NOW() WHERE phone = :phone");
+    $stmt->execute([':phone' => $phone]);
+    
+    // Delete used verification
+    $conn->prepare("DELETE FROM phone_verifications WHERE phone = :phone")->execute([':phone' => $phone]);
+    
+    ResponseHandler::success([], 'Phone number verified successfully');
 }
 
 /*********************************
@@ -915,7 +1034,116 @@ function forgotPassword($conn, $data) {
         ResponseHandler::error('Email or phone number is required', 400);
     }
 
-    ResponseHandler::success([], 'If your account exists, you will receive reset instructions');
+    $isPhone = preg_match('/^[\+]?[0-9\s\-\(\)]+$/', $identifier);
+    $isEmail = filter_var($identifier, FILTER_VALIDATE_EMAIL);
+
+    if (!$isPhone && !$isEmail) {
+        ResponseHandler::error('Please enter a valid email or phone number', 400);
+    }
+
+    if ($isPhone) {
+        $phone = cleanPhoneNumber($identifier);
+        $stmt = $conn->prepare("SELECT id, email FROM users WHERE phone = :phone");
+        $stmt->execute([':phone' => $phone]);
+    } else {
+        $stmt = $conn->prepare("SELECT id, email FROM users WHERE email = :email");
+        $stmt->execute([':email' => $identifier]);
+    }
+    
+    $user = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$user) {
+        ResponseHandler::success([], 'If your account exists, you will receive reset instructions');
+        return;
+    }
+
+    $resetToken = bin2hex(random_bytes(32));
+    $expiresAt = date('Y-m-d H:i:s', time() + 3600);
+    
+    $stmt = $conn->prepare(
+        "UPDATE users SET 
+            reset_token = :token,
+            reset_token_expires = :expires
+         WHERE id = :id"
+    );
+    $stmt->execute([
+        ':token' => $resetToken,
+        ':expires' => $expiresAt,
+        ':id' => $user['id']
+    ]);
+
+    // Send reset link via email
+    $resetLink = "https://yourdomain.com/reset-password?token=" . $resetToken;
+    sendPasswordResetEmail($user['email'], $resetLink);
+
+    ResponseHandler::success([], 'Reset instructions sent to your email');
+}
+
+/*********************************
+ * SEND PASSWORD RESET EMAIL
+ *********************************/
+function sendPasswordResetEmail($email, $resetLink) {
+    global $smtpHost, $smtpPort, $smtpUser, $smtpPassword, $smtpFromEmail, $smtpFromName;
+    
+    $mail = new PHPMailer(true);
+    
+    try {
+        $mail->isSMTP();
+        $mail->Host       = $smtpHost;
+        $mail->SMTPAuth   = true;
+        $mail->Username   = $smtpUser;
+        $mail->Password   = $smtpPassword;
+        $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
+        $mail->Port       = $smtpPort;
+        
+        $mail->setFrom($smtpFromEmail, $smtpFromName);
+        $mail->addAddress($email);
+        
+        $mail->isHTML(true);
+        $mail->Subject = 'Reset Your Password - DropX';
+        
+        $mail->Body = '
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Password Reset</title>
+            <style>
+                body { font-family: Arial, sans-serif; background-color: #f5f5f5; margin: 0; padding: 0; }
+                .container { max-width: 600px; margin: 20px auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                .header { background-color: #44A3E3; padding: 30px; text-align: center; }
+                .header h1 { color: #ffffff; margin: 0; font-size: 28px; }
+                .content { padding: 40px 30px; text-align: center; }
+                .button { display: inline-block; padding: 12px 30px; background-color: #44A3E3; color: #ffffff; text-decoration: none; border-radius: 5px; margin: 20px 0; font-weight: bold; }
+                .message { color: #666666; line-height: 1.6; margin-bottom: 30px; }
+                .footer { background-color: #f9f9f9; padding: 20px; text-align: center; color: #999999; font-size: 12px; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>DropX</h1>
+                </div>
+                <div class="content">
+                    <h2>Reset Your Password</h2>
+                    <p class="message">We received a request to reset your password. Click the button below to create a new password.</p>
+                    <a href="' . $resetLink . '" class="button">Reset Password</a>
+                    <p class="message">This link will expire in <strong>1 hour</strong>.<br>If you didn\'t request this, please ignore this email.</p>
+                </div>
+                <div class="footer">
+                    &copy; ' . date('Y') . ' DropX. All rights reserved.
+                </div>
+            </div>
+        </body>
+        </html>
+        ';
+        
+        $mail->send();
+        return true;
+    } catch (Exception $e) {
+        error_log("Password reset email failed: {$mail->ErrorInfo}");
+        return false;
+    }
 }
 
 /*********************************
@@ -927,27 +1155,8 @@ function logoutUser() {
 }
 
 /*********************************
- * HELPER FUNCTIONS
+ * FORMAT USER DATA FOR FLUTTER
  *********************************/
-
-/**
- * Clean phone number - remove non-digits, preserve leading +
- */
-function cleanPhoneNumber($phone) {
-    $phone = trim($phone);
-    $hasPlus = substr($phone, 0, 1) === '+';
-    $digits = preg_replace('/\D/', '', $phone);
-    
-    if ($hasPlus) {
-        return '+' . $digits;
-    }
-    
-    return $digits;
-}
-
-/**
- * Format user data for Flutter
- */
 function formatUserData($conn, $user) {
     $address = null;
     $city = null;
