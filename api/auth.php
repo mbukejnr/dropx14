@@ -41,7 +41,7 @@ use Firebase\JWT\JWT;
 use Firebase\JWT\Key;
 
 // Firebase Project ID - REPLACE WITH YOUR ACTUAL FIREBASE PROJECT ID
-$firebaseProjectId = 'YOUR_FIREBASE_PROJECT_ID';
+$firebaseProjectId = 'dropxdelivery-80';
 
 // Get Firebase public keys from Google
 function getFirebasePublicKeys() {
