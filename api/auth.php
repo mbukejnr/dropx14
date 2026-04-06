@@ -31,175 +31,60 @@ if (session_status() === PHP_SESSION_NONE) {
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../includes/ResponseHandler.php';
 
-// Load Composer dependencies
-require_once __DIR__ . '/../vendor/autoload.php';
-
-use MailerSend\MailerSend;
-use MailerSend\Helpers\Builder\Recipient;
-use MailerSend\Helpers\Builder\EmailParams;
-
 /*********************************
  * MAILERSEND CONFIGURATION
- * Uses environment variables (set in Railway dashboard)
- * NO .env file needed - this is more secure!
  *********************************/
-
-// Get values from environment variables (Railway, Heroku, etc.)
 $mailersendApiKey = getenv('MAILERSEND_API_KEY') ?: ($_ENV['MAILERSEND_API_KEY'] ?? '');
-$mailersendFromEmail = getenv('MAILERSEND_FROM_EMAIL') ?: ($_ENV['MAILERSEND_FROM_EMAIL'] ?? 'noreply@dropx.com');
+$mailersendFromEmail = getenv('MAILERSEND_FROM_EMAIL') ?: ($_ENV['MAILERSEND_FROM_EMAIL'] ?? 'test-yxj6lj9e5204do2r.mlsender.net');
 $mailersendFromName = getenv('MAILERSEND_FROM_NAME') ?: ($_ENV['MAILERSEND_FROM_NAME'] ?? 'DropX Delivery');
 
-// Log configuration status (for debugging)
-error_log("📧 MailerSend configured: " . (empty($mailersendApiKey) ? 'NO API KEY' : 'API KEY SET'));
+error_log("📧 MailerSend: " . (empty($mailersendApiKey) ? 'NO API KEY' : 'API KEY SET'));
 
 /*********************************
- * SEND EMAIL USING MAILERSEND
+ * SEND EMAIL FUNCTION
  *********************************/
 function sendEmailVerificationCode($email, $code) {
     global $mailersendApiKey, $mailersendFromEmail, $mailersendFromName;
     
-    // Log for debugging
-    error_log("📧 Sending verification code to $email: $code");
-    
-    // Check if API key is configured
-    if (empty($mailersendApiKey)) {
-        error_log("⚠️ MailerSend API key not configured. Set MAILERSEND_API_KEY environment variable.");
-        return false;
-    }
-    
-    // Validate email format
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        error_log("❌ Invalid email address: $email");
-        return false;
-    }
-    
-    try {
-        $mailersend = new MailerSend(['api_key' => $mailersendApiKey]);
-        
-        $recipients = [
-            new Recipient($email, 'User')
-        ];
-        
-        $emailParams = (new EmailParams())
-            ->setFrom($mailersendFromEmail)
-            ->setFromName($mailersendFromName)
-            ->setRecipients($recipients)
-            ->setSubject('Verify Your Email - DropX')
-            ->setHtml('
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <title>Email Verification</title>
-                <style>
-                    body { font-family: Arial, sans-serif; background-color: #f5f5f5; margin: 0; padding: 0; }
-                    .container { max-width: 600px; margin: 20px auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-                    .header { background-color: #44A3E3; padding: 30px; text-align: center; }
-                    .header h1 { color: #ffffff; margin: 0; font-size: 28px; }
-                    .content { padding: 40px 30px; text-align: center; }
-                    .code { font-size: 48px; font-weight: bold; color: #44A3E3; letter-spacing: 10px; background-color: #f0f7ff; padding: 20px; border-radius: 10px; margin: 20px 0; font-family: monospace; }
-                    .message { color: #666666; line-height: 1.6; margin-bottom: 30px; }
-                    .footer { background-color: #f9f9f9; padding: 20px; text-align: center; color: #999999; font-size: 12px; }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="header">
-                        <h1>DropX</h1>
-                    </div>
-                    <div class="content">
-                        <h2>Verify Your Email Address</h2>
-                        <p class="message">Thank you for registering with DropX. Please use the verification code below to complete your registration.</p>
-                        <div class="code">' . $code . '</div>
-                        <p class="message">This code will expire in <strong>5 minutes</strong>.<br>If you didn\'t request this, please ignore this email.</p>
-                    </div>
-                    <div class="footer">
-                        &copy; ' . date('Y') . ' DropX. All rights reserved.
-                    </div>
-                </div>
-            </body>
-            </html>
-            ')
-            ->setText("Your DropX verification code is: $code\n\nThis code will expire in 5 minutes.\n\nNever share this code with anyone.");
-        
-        $response = $mailersend->email->send($emailParams);
-        error_log("✅ Email sent successfully to $email");
-        return true;
-        
-    } catch (Exception $e) {
-        error_log("❌ Email failed to send to $email: " . $e->getMessage());
-        return false;
-    }
-}
-
-/*********************************
- * SEND PASSWORD RESET EMAIL
- *********************************/
-function sendPasswordResetEmail($email, $resetLink) {
-    global $mailersendApiKey, $mailersendFromEmail, $mailersendFromName;
+    error_log("📧 Sending to: $email, Code: $code");
     
     if (empty($mailersendApiKey)) {
-        error_log("⚠️ MailerSend not configured.");
+        error_log("❌ No API key");
         return false;
     }
     
-    try {
-        $mailersend = new MailerSend(['api_key' => $mailersendApiKey]);
-        
-        $recipients = [
-            new Recipient($email, 'User')
-        ];
-        
-        $emailParams = (new EmailParams())
-            ->setFrom($mailersendFromEmail)
-            ->setFromName($mailersendFromName)
-            ->setRecipients($recipients)
-            ->setSubject('Reset Your Password - DropX')
-            ->setHtml('
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <title>Password Reset</title>
-                <style>
-                    body { font-family: Arial, sans-serif; background-color: #f5f5f5; margin: 0; padding: 0; }
-                    .container { max-width: 600px; margin: 20px auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-                    .header { background-color: #44A3E3; padding: 30px; text-align: center; }
-                    .header h1 { color: #ffffff; margin: 0; font-size: 28px; }
-                    .content { padding: 40px 30px; text-align: center; }
-                    .button { display: inline-block; padding: 12px 30px; background-color: #44A3E3; color: #ffffff; text-decoration: none; border-radius: 5px; margin: 20px 0; font-weight: bold; }
-                    .message { color: #666666; line-height: 1.6; margin-bottom: 30px; }
-                    .footer { background-color: #f9f9f9; padding: 20px; text-align: center; color: #999999; font-size: 12px; }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="header">
-                        <h1>DropX</h1>
-                    </div>
-                    <div class="content">
-                        <h2>Reset Your Password</h2>
-                        <p class="message">We received a request to reset your password. Click the button below to create a new password.</p>
-                        <a href="' . $resetLink . '" class="button">Reset Password</a>
-                        <p class="message">This link will expire in <strong>1 hour</strong>.<br>If you didn\'t request this, please ignore this email.</p>
-                    </div>
-                    <div class="footer">
-                        &copy; ' . date('Y') . ' DropX. All rights reserved.
-                    </div>
-                </div>
-            </body>
-            </html>
-            ')
-            ->setText("Reset your password: $resetLink\n\nThis link expires in 1 hour.");
-        
-        $mailersend->email->send($emailParams);
-        error_log("✅ Password reset email sent to $email");
+    $data = [
+        'from' => ['email' => $mailersendFromEmail, 'name' => $mailersendFromName],
+        'to' => [['email' => $email]],
+        'subject' => 'Verify Your Email - DropX',
+        'text' => "Your verification code is: $code\n\nExpires in 5 minutes.",
+        'html' => "<h2>Your verification code is: <strong style='font-size:24px'>$code</strong></h2><p>Expires in 5 minutes.</p>"
+    ];
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, 'https://api.mailersend.com/v1/email');
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $mailersendApiKey
+    ]);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    error_log("HTTP: $httpCode, Response: " . substr($response, 0, 200));
+    
+    if ($httpCode === 202 || $httpCode === 200) {
+        error_log("✅ Email sent!");
         return true;
-        
-    } catch (Exception $e) {
-        error_log("❌ Password reset email failed: " . $e->getMessage());
-        return false;
     }
+    
+    error_log("❌ Failed");
+    return false;
 }
 
 /*********************************
@@ -213,7 +98,6 @@ function cleanPhoneNumber($phone) {
     if ($hasPlus) {
         return '+' . $digits;
     }
-    
     return $digits;
 }
 
@@ -279,7 +163,6 @@ function handlePostRequest() {
     $action = $input['action'] ?? '';
 
     switch ($action) {
-        // Authentication
         case 'login':
             loginUser($conn, $input);
             break;
@@ -289,8 +172,6 @@ function handlePostRequest() {
         case 'logout':
             logoutUser();
             break;
-        
-        // Email Verification Actions
         case 'send_email_verification':
         case 'resend_email_verification':
             sendEmailVerification($conn, $input);
@@ -301,8 +182,6 @@ function handlePostRequest() {
         case 'check_email_verification_status':
             checkEmailVerificationStatus($conn, $input);
             break;
-        
-        // Phone Verification Actions
         case 'send_phone_verification':
         case 'resend_phone_verification':
             sendPhoneVerification($conn, $input);
@@ -313,8 +192,6 @@ function handlePostRequest() {
         case 'check_phone_verification_status':
             checkPhoneVerificationStatus($conn, $input);
             break;
-        
-        // Profile Management
         case 'update_profile':
             updateProfile($conn, $input);
             break;
@@ -327,15 +204,12 @@ function handlePostRequest() {
         case 'forgot_password':
             forgotPassword($conn, $input);
             break;
-        
-        // Address Management
         case 'get_addresses':
             getAddresses($conn, $input);
             break;
         case 'delete_address':
             deleteAddress($conn, $input);
             break;
-        
         default:
             ResponseHandler::error('Invalid action: ' . $action, 400);
     }
@@ -419,7 +293,6 @@ function registerUser($conn, $data) {
         }
     }
 
-    // Check if user exists
     $checkSql = "SELECT id FROM users WHERE ";
     $params = [];
     
@@ -483,7 +356,7 @@ function registerUser($conn, $data) {
 }
 
 /*********************************
- * EMAIL VERIFICATION FUNCTIONS
+ * EMAIL VERIFICATION
  *********************************/
 function checkEmailVerificationStatus($conn, $data) {
     $email = trim($data['email'] ?? '');
@@ -508,7 +381,6 @@ function sendEmailVerification($conn, $data) {
         ResponseHandler::error('Valid email address is required', 400);
     }
     
-    // Check if user exists
     $stmt = $conn->prepare("SELECT id, email_verified FROM users WHERE email = :email");
     $stmt->execute([':email' => $email]);
     $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -521,11 +393,9 @@ function sendEmailVerification($conn, $data) {
         ResponseHandler::error('Email already verified', 400);
     }
     
-    // Generate 6-digit code
     $verificationCode = sprintf("%06d", random_int(0, 999999));
     $expiresAt = date('Y-m-d H:i:s', time() + 300);
     
-    // Store in database
     $stmt = $conn->prepare(
         "INSERT INTO email_verifications (email, code, expires_at, created_at)
          VALUES (:email, :code, :expires_at, NOW())
@@ -542,7 +412,6 @@ function sendEmailVerification($conn, $data) {
         ':expires_at' => $expiresAt
     ]);
     
-    // Send email using MailerSend
     $emailSent = sendEmailVerificationCode($email, $verificationCode);
     
     if (!$emailSent) {
@@ -570,7 +439,6 @@ function verifyEmail($conn, $data) {
         ResponseHandler::error('Valid 6-digit verification code is required', 400);
     }
     
-    // Get verification record
     $stmt = $conn->prepare(
         "SELECT id, code, expires_at, attempts 
          FROM email_verifications 
@@ -585,19 +453,16 @@ function verifyEmail($conn, $data) {
         ResponseHandler::error('No verification code found. Please request a new code.', 400);
     }
     
-    // Check attempts
     if ($verification['attempts'] >= 5) {
         $conn->prepare("DELETE FROM email_verifications WHERE email = :email")->execute([':email' => $email]);
         ResponseHandler::error('Too many failed attempts. Please request a new code.', 400);
     }
     
-    // Check expiration
     if (strtotime($verification['expires_at']) < time()) {
         $conn->prepare("DELETE FROM email_verifications WHERE email = :email")->execute([':email' => $email]);
         ResponseHandler::error('Verification code expired. Please request a new code.', 400);
     }
     
-    // Verify code
     if ($verification['code'] !== $code) {
         $conn->prepare("UPDATE email_verifications SET attempts = attempts + 1 WHERE id = :id")
               ->execute([':id' => $verification['id']]);
@@ -606,18 +471,16 @@ function verifyEmail($conn, $data) {
         ResponseHandler::error("Invalid code. $remaining attempts remaining.", 400);
     }
     
-    // Update user's email verification status
     $stmt = $conn->prepare("UPDATE users SET email_verified = 1, updated_at = NOW() WHERE email = :email");
     $stmt->execute([':email' => $email]);
     
-    // Delete used verification
     $conn->prepare("DELETE FROM email_verifications WHERE email = :email")->execute([':email' => $email]);
     
     ResponseHandler::success([], 'Email verified successfully');
 }
 
 /*********************************
- * PHONE VERIFICATION FUNCTIONS
+ * PHONE VERIFICATION
  *********************************/
 function checkPhoneVerificationStatus($conn, $data) {
     $phone = cleanPhoneNumber($data['phone'] ?? '');
@@ -642,7 +505,6 @@ function sendPhoneVerification($conn, $data) {
         ResponseHandler::error('Valid phone number is required', 400);
     }
     
-    // Check if user exists
     $stmt = $conn->prepare("SELECT id, phone_verified FROM users WHERE phone = :phone");
     $stmt->execute([':phone' => $phone]);
     $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -655,11 +517,9 @@ function sendPhoneVerification($conn, $data) {
         ResponseHandler::error('Phone already verified', 400);
     }
     
-    // Generate 6-digit code
     $verificationCode = sprintf("%06d", random_int(0, 999999));
     $expiresAt = date('Y-m-d H:i:s', time() + 300);
     
-    // Store in database
     $stmt = $conn->prepare(
         "INSERT INTO phone_verifications (phone, code, expires_at, created_at)
          VALUES (:phone, :code, :expires_at, NOW())
@@ -676,8 +536,7 @@ function sendPhoneVerification($conn, $data) {
         ':expires_at' => $expiresAt
     ]);
     
-    // For now, return the code (SMS will be implemented later)
-    error_log("📱 SMS VERIFICATION CODE FOR $phone: $verificationCode");
+    error_log("📱 SMS CODE FOR $phone: $verificationCode");
     
     ResponseHandler::success([
         'code' => $verificationCode,
@@ -697,7 +556,6 @@ function verifyPhone($conn, $data) {
         ResponseHandler::error('Valid 6-digit verification code is required', 400);
     }
     
-    // Get verification record
     $stmt = $conn->prepare(
         "SELECT id, code, expires_at, attempts 
          FROM phone_verifications 
@@ -712,19 +570,16 @@ function verifyPhone($conn, $data) {
         ResponseHandler::error('No verification code found. Please request a new code.', 400);
     }
     
-    // Check attempts
     if ($verification['attempts'] >= 5) {
         $conn->prepare("DELETE FROM phone_verifications WHERE phone = :phone")->execute([':phone' => $phone]);
         ResponseHandler::error('Too many failed attempts. Please request a new code.', 400);
     }
     
-    // Check expiration
     if (strtotime($verification['expires_at']) < time()) {
         $conn->prepare("DELETE FROM phone_verifications WHERE phone = :phone")->execute([':phone' => $phone]);
         ResponseHandler::error('Verification code expired. Please request a new code.', 400);
     }
     
-    // Verify code
     if ($verification['code'] !== $code) {
         $conn->prepare("UPDATE phone_verifications SET attempts = attempts + 1 WHERE id = :id")
               ->execute([':id' => $verification['id']]);
@@ -733,18 +588,16 @@ function verifyPhone($conn, $data) {
         ResponseHandler::error("Invalid code. $remaining attempts remaining.", 400);
     }
     
-    // Update user's phone verification status
     $stmt = $conn->prepare("UPDATE users SET phone_verified = 1, updated_at = NOW() WHERE phone = :phone");
     $stmt->execute([':phone' => $phone]);
     
-    // Delete used verification
     $conn->prepare("DELETE FROM phone_verifications WHERE phone = :phone")->execute([':phone' => $phone]);
     
     ResponseHandler::success([], 'Phone number verified successfully');
 }
 
 /*********************************
- * UPDATE PROFILE
+ * PROFILE & ADDRESS FUNCTIONS
  *********************************/
 function updateProfile($conn, $data) {
     if (empty($_SESSION['user_id'])) {
@@ -796,9 +649,6 @@ function updateProfile($conn, $data) {
     ], 'Profile updated successfully');
 }
 
-/*********************************
- * UPDATE ADDRESS
- *********************************/
 function updateAddress($conn, $data) {
     if (empty($_SESSION['user_id'])) {
         ResponseHandler::error('Unauthorized', 401);
@@ -897,9 +747,6 @@ function updateAddress($conn, $data) {
     ], 'Address saved successfully');
 }
 
-/*********************************
- * GET ADDRESSES
- *********************************/
 function getAddresses($conn, $data) {
     if (empty($_SESSION['user_id'])) {
         ResponseHandler::error('Unauthorized', 401);
@@ -918,9 +765,6 @@ function getAddresses($conn, $data) {
     ]);
 }
 
-/*********************************
- * DELETE ADDRESS
- *********************************/
 function deleteAddress($conn, $data) {
     if (empty($_SESSION['user_id'])) {
         ResponseHandler::error('Unauthorized', 401);
@@ -943,9 +787,6 @@ function deleteAddress($conn, $data) {
     ResponseHandler::success([], 'Address deleted successfully');
 }
 
-/*********************************
- * CHANGE PASSWORD
- *********************************/
 function changePassword($conn, $data) {
     if (empty($_SESSION['user_id'])) {
         ResponseHandler::error('Unauthorized', 401);
@@ -986,9 +827,6 @@ function changePassword($conn, $data) {
     ResponseHandler::success([], 'Password changed successfully');
 }
 
-/*********************************
- * FORGOT PASSWORD
- *********************************/
 function forgotPassword($conn, $data) {
     $identifier = trim($data['identifier'] ?? '');
 
@@ -1034,24 +872,17 @@ function forgotPassword($conn, $data) {
         ':id' => $user['id']
     ]);
 
-    // Send reset link via email
     $resetLink = "https://yourdomain.com/reset-password?token=" . $resetToken;
     sendPasswordResetEmail($user['email'], $resetLink);
 
     ResponseHandler::success([], 'Reset instructions sent to your email');
 }
 
-/*********************************
- * LOGOUT
- *********************************/
 function logoutUser() {
     session_destroy();
     ResponseHandler::success([], 'Logout successful');
 }
 
-/*********************************
- * FORMAT USER DATA FOR FLUTTER
- *********************************/
 function formatUserData($conn, $user) {
     $address = null;
     $city = null;
