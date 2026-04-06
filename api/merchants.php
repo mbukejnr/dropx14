@@ -34,7 +34,7 @@ require_once __DIR__ . '/../includes/ResponseHandler.php';
 /*********************************
  * BASE URL CONFIGURATION
  *********************************/
-$baseUrl = "https://dropx12-production.up.railway.app";
+$baseUrl = "https://dropx13-production.up.railway.app";
 
 /*********************************
  * INITIALIZATION & HELPER FUNCTIONS

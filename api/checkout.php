@@ -80,7 +80,7 @@ define('DELIVERY_FEE_PER_KM', 250.00);
 define('DELIVERY_FEE_MINIMUM', 1500.00);
 define('DELIVERY_FEE_MAXIMUM', 20000.00);
 define('MAX_DELIVERY_DISTANCE', 50);
-define('DELIVERY_FEE_API_URL', 'https://dropx12-production.up.railway.app/api/delivery_fee.php');
+define('DELIVERY_FEE_API_URL', 'https://dropx13-production.up.railway.app/api/delivery_fee.php');
 
 /*********************************
  * ORDER STATUS CONSTANTS
