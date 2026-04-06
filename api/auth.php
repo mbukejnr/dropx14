@@ -34,203 +34,160 @@ require_once __DIR__ . '/../includes/ResponseHandler.php';
 // Load Composer dependencies
 require_once __DIR__ . '/../vendor/autoload.php';
 
-use PHPMailer\PHPMailer\PHPMailer;
-use PHPMailer\PHPMailer\SMTP;
-use PHPMailer\PHPMailer\Exception;
+use MailerSend\MailerSend;
+use MailerSend\Helpers\Builder\Recipient;
+use MailerSend\Helpers\Builder\EmailParams;
 
 /*********************************
- * EMAIL CONFIGURATION (SMTP)
+ * MAILERSEND CONFIGURATION (FREE - 3000 emails/month)
  *********************************/
-// Using Gmail SMTP - REPLACE WITH YOUR CREDENTIALS
-$smtpHost = 'smtp.gmail.com';
-$smtpPort = 587;
-$smtpUser = 'www.framkmwakasungula@gmail.com'; // REPLACE WITH YOUR EMAIL
-$smtpPassword = 'cwwn gdbh vdbh ntct'; // REPLACE WITH YOUR APP PASSWORD
-$smtpFromEmail = 'noreply@dropx.com';
-$smtpFromName = 'DropX Delivery';
+// Get your API key from: MailerSend Dashboard → Integrations → API
+$mailersendApiKey = 'mlsn.73d24d9095e502965b60f364b00c22d70c238fcdf58d909e6727b02353053eee'; // REPLACE WITH YOUR ACTUAL API KEY
+$mailersendFromEmail = 'test-yxj6lj9e5204do2r.mlsender.net
+'; // Your verified domain or use test domain
+$mailersendFromName = 'DropX Delivery';
 
 /*********************************
- * SMS CONFIGURATION (Africa's Talking - Malawi)
- *********************************/
-$africastalkingUsername = 'sandbox'; // Keep as 'sandbox' for testing
-$africastalkingApiKey = 'atsk_b89e1c9fec477b56cf6ce2f1b3755d4961605dbacd3bf43c0b1f108d4085089137eda572'; // REPLACE WITH YOUR ACTUAL API KEY
-$africastalkingFrom = 'DropX'; // Sender ID (max 11 characters)
-
-/*********************************
- * SEND EMAIL USING PHPMailer
+ * SEND EMAIL USING MAILERSEND
  *********************************/
 function sendEmailVerificationCode($email, $code) {
-    global $smtpHost, $smtpPort, $smtpUser, $smtpPassword, $smtpFromEmail, $smtpFromName;
+    global $mailersendApiKey, $mailersendFromEmail, $mailersendFromName;
     
-    // For development/testing - log the code
-    error_log("📧 VERIFICATION CODE FOR $email: $code");
+    // Log for debugging
+    error_log("📧 Sending verification code to $email: $code");
     
-    // Check if SMTP is configured
-    if ($smtpUser === 'your-email@gmail.com' || empty($smtpUser)) {
-        error_log("SMTP not configured. Please update email credentials.");
+    // Check if API key is configured
+    if (empty($mailersendApiKey) || $mailersendApiKey === 'mlsn.your_api_key_here') {
+        error_log("⚠️ MailerSend not configured. Please add your API key.");
         return false;
     }
     
-    $mail = new PHPMailer(true);
-    
     try {
-        // Server settings
-        $mail->isSMTP();
-        $mail->Host       = $smtpHost;
-        $mail->SMTPAuth   = true;
-        $mail->Username   = $smtpUser;
-        $mail->Password   = $smtpPassword;
-        $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
-        $mail->Port       = $smtpPort;
+        $mailersend = new MailerSend(['api_key' => $mailersendApiKey]);
         
-        // Recipients
-        $mail->setFrom($smtpFromEmail, $smtpFromName);
-        $mail->addAddress($email);
+        $recipients = [
+            new Recipient($email, 'User')
+        ];
         
-        // Content
-        $mail->isHTML(true);
-        $mail->Subject = 'Verify Your Email - DropX';
-        
-        $mail->Body = '
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <title>Email Verification</title>
-            <style>
-                body { font-family: Arial, sans-serif; background-color: #f5f5f5; margin: 0; padding: 0; }
-                .container { max-width: 600px; margin: 20px auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-                .header { background-color: #44A3E3; padding: 30px; text-align: center; }
-                .header h1 { color: #ffffff; margin: 0; font-size: 28px; }
-                .content { padding: 40px 30px; text-align: center; }
-                .code { font-size: 48px; font-weight: bold; color: #44A3E3; letter-spacing: 10px; background-color: #f0f7ff; padding: 20px; border-radius: 10px; margin: 20px 0; font-family: monospace; }
-                .message { color: #666666; line-height: 1.6; margin-bottom: 30px; }
-                .footer { background-color: #f9f9f9; padding: 20px; text-align: center; color: #999999; font-size: 12px; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>DropX</h1>
+        $emailParams = (new EmailParams())
+            ->setFrom($mailersendFromEmail)
+            ->setFromName($mailersendFromName)
+            ->setRecipients($recipients)
+            ->setSubject('Verify Your Email - DropX')
+            ->setHtml('
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>Email Verification</title>
+                <style>
+                    body { font-family: Arial, sans-serif; background-color: #f5f5f5; margin: 0; padding: 0; }
+                    .container { max-width: 600px; margin: 20px auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                    .header { background-color: #44A3E3; padding: 30px; text-align: center; }
+                    .header h1 { color: #ffffff; margin: 0; font-size: 28px; }
+                    .content { padding: 40px 30px; text-align: center; }
+                    .code { font-size: 48px; font-weight: bold; color: #44A3E3; letter-spacing: 10px; background-color: #f0f7ff; padding: 20px; border-radius: 10px; margin: 20px 0; font-family: monospace; }
+                    .message { color: #666666; line-height: 1.6; margin-bottom: 30px; }
+                    .footer { background-color: #f9f9f9; padding: 20px; text-align: center; color: #999999; font-size: 12px; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>DropX</h1>
+                    </div>
+                    <div class="content">
+                        <h2>Verify Your Email Address</h2>
+                        <p class="message">Thank you for registering with DropX. Please use the verification code below to complete your registration.</p>
+                        <div class="code">' . $code . '</div>
+                        <p class="message">This code will expire in <strong>5 minutes</strong>.<br>If you didn\'t request this, please ignore this email.</p>
+                    </div>
+                    <div class="footer">
+                        &copy; ' . date('Y') . ' DropX. All rights reserved.
+                    </div>
                 </div>
-                <div class="content">
-                    <h2>Verify Your Email Address</h2>
-                    <p class="message">Thank you for registering with DropX. Please use the verification code below to complete your registration.</p>
-                    <div class="code">' . $code . '</div>
-                    <p class="message">This code will expire in <strong>5 minutes</strong>.<br>If you didn\'t request this, please ignore this email.</p>
-                </div>
-                <div class="footer">
-                    &copy; ' . date('Y') . ' DropX. All rights reserved.
-                </div>
-            </div>
-        </body>
-        </html>
-        ';
+            </body>
+            </html>
+            ')
+            ->setText("Your DropX verification code is: $code\n\nThis code will expire in 5 minutes.\n\nNever share this code with anyone.");
         
-        $mail->AltBody = "Your DropX verification code is: $code\n\nThis code will expire in 5 minutes.\n\nNever share this code with anyone.";
-        
-        $mail->send();
-        error_log("Email sent successfully to $email");
+        $response = $mailersend->email->send($emailParams);
+        error_log("✅ Email sent successfully to $email");
         return true;
         
     } catch (Exception $e) {
-        error_log("Email failed to send to $email: {$mail->ErrorInfo}");
+        error_log("❌ Email failed to send to $email: " . $e->getMessage());
         return false;
     }
 }
 
 /*********************************
- * SEND SMS USING AFRICA'S TALKING
+ * SEND PASSWORD RESET EMAIL
  *********************************/
-function sendSmsVerificationCode($phone, $code) {
-    global $africastalkingUsername, $africastalkingApiKey, $africastalkingFrom;
+function sendPasswordResetEmail($email, $resetLink) {
+    global $mailersendApiKey, $mailersendFromEmail, $mailersendFromName;
     
-    // For development/testing - log the code
-    error_log("📱 SMS VERIFICATION CODE FOR $phone: $code");
-    
-    // Check if Africa's Talking is configured
-    if (empty($africastalkingApiKey) || $africastalkingApiKey === 'YOUR_API_KEY_HERE') {
-        error_log("Africa's Talking not configured. Please update SMS credentials.");
+    if (empty($mailersendApiKey) || $mailersendApiKey === 'mlsn.your_api_key_here') {
+        error_log("⚠️ MailerSend not configured.");
         return false;
     }
     
-    // Format phone number for Malawi
-    $formattedPhone = formatPhoneNumberForMalawi($phone);
-    
-    // Africa's Talking API endpoint (Sandbox)
-    $url = 'https://api.sandbox.africastalking.com/version1/messaging';
-    
-    $data = [
-        'username' => $africastalkingUsername,
-        'to' => $formattedPhone,
-        'message' => "DropX Verification\n\nYour verification code is: $code\n\nThis code will expire in 5 minutes.\n\nNever share this code with anyone.",
-        'from' => $africastalkingFrom
-    ];
-    
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'ApiKey: ' . $africastalkingApiKey,
-        'Content-Type: application/x-www-form-urlencoded',
-        'Accept: application/json'
-    ]);
-    
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curlError = curl_error($ch);
-    curl_close($ch);
-    
-    if ($curlError) {
-        error_log("CURL Error: $curlError");
+    try {
+        $mailersend = new MailerSend(['api_key' => $mailersendApiKey]);
+        
+        $recipients = [
+            new Recipient($email, 'User')
+        ];
+        
+        $emailParams = (new EmailParams())
+            ->setFrom($mailersendFromEmail)
+            ->setFromName($mailersendFromName)
+            ->setRecipients($recipients)
+            ->setSubject('Reset Your Password - DropX')
+            ->setHtml('
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>Password Reset</title>
+                <style>
+                    body { font-family: Arial, sans-serif; background-color: #f5f5f5; margin: 0; padding: 0; }
+                    .container { max-width: 600px; margin: 20px auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                    .header { background-color: #44A3E3; padding: 30px; text-align: center; }
+                    .header h1 { color: #ffffff; margin: 0; font-size: 28px; }
+                    .content { padding: 40px 30px; text-align: center; }
+                    .button { display: inline-block; padding: 12px 30px; background-color: #44A3E3; color: #ffffff; text-decoration: none; border-radius: 5px; margin: 20px 0; font-weight: bold; }
+                    .message { color: #666666; line-height: 1.6; margin-bottom: 30px; }
+                    .footer { background-color: #f9f9f9; padding: 20px; text-align: center; color: #999999; font-size: 12px; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>DropX</h1>
+                    </div>
+                    <div class="content">
+                        <h2>Reset Your Password</h2>
+                        <p class="message">We received a request to reset your password. Click the button below to create a new password.</p>
+                        <a href="' . $resetLink . '" class="button">Reset Password</a>
+                        <p class="message">This link will expire in <strong>1 hour</strong>.<br>If you didn\'t request this, please ignore this email.</p>
+                    </div>
+                    <div class="footer">
+                        &copy; ' . date('Y') . ' DropX. All rights reserved.
+                    </div>
+                </div>
+            </body>
+            </html>
+            ')
+            ->setText("Reset your password: $resetLink\n\nThis link expires in 1 hour.");
+        
+        $mailersend->email->send($emailParams);
+        return true;
+        
+    } catch (Exception $e) {
+        error_log("Password reset email failed: " . $e->getMessage());
         return false;
     }
-    
-    if ($httpCode === 201 || $httpCode === 200) {
-        $result = json_decode($response, true);
-        if (isset($result['SMSMessageData']['Recipients'][0]['status']) && 
-            $result['SMSMessageData']['Recipients'][0]['status'] === 'Success') {
-            error_log("SMS sent successfully to $phone");
-            return true;
-        } else {
-            error_log("SMS API returned error: " . print_r($result, true));
-            return false;
-        }
-    } else {
-        error_log("SMS failed for $phone. HTTP Code: $httpCode, Response: $response");
-        return false;
-    }
-}
-
-/*********************************
- * FORMAT PHONE NUMBER FOR MALAWI
- *********************************/
-function formatPhoneNumberForMalawi($phone) {
-    // Remove all non-numeric characters except '+'
-    $phone = preg_replace('/[^0-9+]/', '', $phone);
-    
-    // If phone already has +, assume it's properly formatted
-    if (substr($phone, 0, 1) === '+') {
-        return $phone;
-    }
-    
-    // Remove leading zero if present
-    $phone = ltrim($phone, '0');
-    
-    // If phone is 9 digits (Malawi local)
-    if (strlen($phone) === 9) {
-        return '+265' . $phone;
-    }
-    
-    // If phone is 12 digits starting with 265
-    if (strlen($phone) === 12 && substr($phone, 0, 3) === '265') {
-        return '+' . $phone;
-    }
-    
-    // Default: add Malawi code
-    return '+265' . $phone;
 }
 
 /*********************************
@@ -573,7 +530,7 @@ function sendEmailVerification($conn, $data) {
         ':expires_at' => $expiresAt
     ]);
     
-    // Send email
+    // Send email using MailerSend
     $emailSent = sendEmailVerificationCode($email, $verificationCode);
     
     if (!$emailSent) {
@@ -648,7 +605,7 @@ function verifyEmail($conn, $data) {
 }
 
 /*********************************
- * PHONE VERIFICATION FUNCTIONS
+ * PHONE VERIFICATION FUNCTIONS (Development Mode - Returns Code)
  *********************************/
 function checkPhoneVerificationStatus($conn, $data) {
     $phone = cleanPhoneNumber($data['phone'] ?? '');
@@ -707,20 +664,14 @@ function sendPhoneVerification($conn, $data) {
         ':expires_at' => $expiresAt
     ]);
     
-    // Send SMS
-    $smsSent = sendSmsVerificationCode($phone, $verificationCode);
-    
-    if (!$smsSent) {
-        ResponseHandler::success([
-            'code' => $verificationCode,
-            'expires_in' => 300
-        ], 'Verification code generated (SMS sending failed - check logs)');
-        return;
-    }
+    // For development - return the code
+    // Replace this with actual SMS API when ready
+    error_log("📱 SMS VERIFICATION CODE FOR $phone: $verificationCode");
     
     ResponseHandler::success([
+        'code' => $verificationCode,
         'expires_in' => 300
-    ], 'Verification code sent to your phone');
+    ], 'Verification code generated (SMS will be implemented in production)');
 }
 
 function verifyPhone($conn, $data) {
@@ -1077,73 +1028,6 @@ function forgotPassword($conn, $data) {
     sendPasswordResetEmail($user['email'], $resetLink);
 
     ResponseHandler::success([], 'Reset instructions sent to your email');
-}
-
-/*********************************
- * SEND PASSWORD RESET EMAIL
- *********************************/
-function sendPasswordResetEmail($email, $resetLink) {
-    global $smtpHost, $smtpPort, $smtpUser, $smtpPassword, $smtpFromEmail, $smtpFromName;
-    
-    $mail = new PHPMailer(true);
-    
-    try {
-        $mail->isSMTP();
-        $mail->Host       = $smtpHost;
-        $mail->SMTPAuth   = true;
-        $mail->Username   = $smtpUser;
-        $mail->Password   = $smtpPassword;
-        $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
-        $mail->Port       = $smtpPort;
-        
-        $mail->setFrom($smtpFromEmail, $smtpFromName);
-        $mail->addAddress($email);
-        
-        $mail->isHTML(true);
-        $mail->Subject = 'Reset Your Password - DropX';
-        
-        $mail->Body = '
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <title>Password Reset</title>
-            <style>
-                body { font-family: Arial, sans-serif; background-color: #f5f5f5; margin: 0; padding: 0; }
-                .container { max-width: 600px; margin: 20px auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-                .header { background-color: #44A3E3; padding: 30px; text-align: center; }
-                .header h1 { color: #ffffff; margin: 0; font-size: 28px; }
-                .content { padding: 40px 30px; text-align: center; }
-                .button { display: inline-block; padding: 12px 30px; background-color: #44A3E3; color: #ffffff; text-decoration: none; border-radius: 5px; margin: 20px 0; font-weight: bold; }
-                .message { color: #666666; line-height: 1.6; margin-bottom: 30px; }
-                .footer { background-color: #f9f9f9; padding: 20px; text-align: center; color: #999999; font-size: 12px; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>DropX</h1>
-                </div>
-                <div class="content">
-                    <h2>Reset Your Password</h2>
-                    <p class="message">We received a request to reset your password. Click the button below to create a new password.</p>
-                    <a href="' . $resetLink . '" class="button">Reset Password</a>
-                    <p class="message">This link will expire in <strong>1 hour</strong>.<br>If you didn\'t request this, please ignore this email.</p>
-                </div>
-                <div class="footer">
-                    &copy; ' . date('Y') . ' DropX. All rights reserved.
-                </div>
-            </div>
-        </body>
-        </html>
-        ';
-        
-        $mail->send();
-        return true;
-    } catch (Exception $e) {
-        error_log("Password reset email failed: {$mail->ErrorInfo}");
-        return false;
-    }
 }
 
 /*********************************
