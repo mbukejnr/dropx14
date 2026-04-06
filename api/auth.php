@@ -34,40 +34,23 @@ require_once __DIR__ . '/../includes/ResponseHandler.php';
 // Load Composer dependencies
 require_once __DIR__ . '/../vendor/autoload.php';
 
-// =============================================
-// LOAD ENVIRONMENT VARIABLES FROM .env FILE
-// =============================================
-use Dotenv\Dotenv;
-
-// Find the root directory (one level above the api folder)
-$rootDir = __DIR__ . '/../';
-
-// Load the .env file if it exists
-if (file_exists($rootDir . '.env')) {
-    $dotenv = Dotenv::createImmutable($rootDir);
-    $dotenv->load();
-    error_log("✅ .env file loaded from: " . $rootDir);
-} else {
-    error_log("⚠️ .env file not found at: " . $rootDir . ".env");
-}
-
 use MailerSend\MailerSend;
 use MailerSend\Helpers\Builder\Recipient;
 use MailerSend\Helpers\Builder\EmailParams;
 
 /*********************************
- * MAILERSEND CONFIGURATION (FROM .env)
+ * MAILERSEND CONFIGURATION
+ * Uses environment variables (set in Railway dashboard)
+ * NO .env file needed - this is more secure!
  *********************************/
-$mailersendApiKey = $_ENV['MAILERSEND_API_KEY'] ?? '';
-$mailersendFromEmail = $_ENV['MAILERSEND_FROM_EMAIL'] ?? 'noreply@dropx.com';
-$mailersendFromName = $_ENV['MAILERSEND_FROM_NAME'] ?? 'DropX Delivery';
 
-/*********************************
- * SMS CONFIGURATION (FROM .env - for future use)
- *********************************/
-$africastalkingUsername = $_ENV['AFRICASTALKING_USERNAME'] ?? 'sandbox';
-$africastalkingApiKey = $_ENV['AFRICASTALKING_API_KEY'] ?? '';
-$africastalkingFrom = $_ENV['AFRICASTALKING_FROM'] ?? 'DropX';
+// Get values from environment variables (Railway, Heroku, etc.)
+$mailersendApiKey = getenv('MAILERSEND_API_KEY') ?: ($_ENV['MAILERSEND_API_KEY'] ?? '');
+$mailersendFromEmail = getenv('MAILERSEND_FROM_EMAIL') ?: ($_ENV['MAILERSEND_FROM_EMAIL'] ?? 'noreply@dropx.com');
+$mailersendFromName = getenv('MAILERSEND_FROM_NAME') ?: ($_ENV['MAILERSEND_FROM_NAME'] ?? 'DropX Delivery');
+
+// Log configuration status (for debugging)
+error_log("📧 MailerSend configured: " . (empty($mailersendApiKey) ? 'NO API KEY' : 'API KEY SET'));
 
 /*********************************
  * SEND EMAIL USING MAILERSEND
@@ -80,7 +63,13 @@ function sendEmailVerificationCode($email, $code) {
     
     // Check if API key is configured
     if (empty($mailersendApiKey)) {
-        error_log("⚠️ MailerSend API key not configured in .env file");
+        error_log("⚠️ MailerSend API key not configured. Set MAILERSEND_API_KEY environment variable.");
+        return false;
+    }
+    
+    // Validate email format
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        error_log("❌ Invalid email address: $email");
         return false;
     }
     
