@@ -34,18 +34,40 @@ require_once __DIR__ . '/../includes/ResponseHandler.php';
 // Load Composer dependencies
 require_once __DIR__ . '/../vendor/autoload.php';
 
+// =============================================
+// LOAD ENVIRONMENT VARIABLES FROM .env FILE
+// =============================================
+use Dotenv\Dotenv;
+
+// Find the root directory (one level above the api folder)
+$rootDir = __DIR__ . '/../';
+
+// Load the .env file if it exists
+if (file_exists($rootDir . '.env')) {
+    $dotenv = Dotenv::createImmutable($rootDir);
+    $dotenv->load();
+    error_log("✅ .env file loaded from: " . $rootDir);
+} else {
+    error_log("⚠️ .env file not found at: " . $rootDir . ".env");
+}
+
 use MailerSend\MailerSend;
 use MailerSend\Helpers\Builder\Recipient;
 use MailerSend\Helpers\Builder\EmailParams;
 
 /*********************************
- * MAILERSEND CONFIGURATION (FREE - 3000 emails/month)
+ * MAILERSEND CONFIGURATION (FROM .env)
  *********************************/
-// Get your API key from: MailerSend Dashboard → Integrations → API
-$mailersendApiKey = 'mlsn.73d24d9095e502965b60f364b00c22d70c238fcdf58d909e6727b02353053eee'; // REPLACE WITH YOUR ACTUAL API KEY
-$mailersendFromEmail = 'test-yxj6lj9e5204do2r.mlsender.net
-'; // Your verified domain or use test domain
-$mailersendFromName = 'DropX Delivery';
+$mailersendApiKey = $_ENV['MAILERSEND_API_KEY'] ?? '';
+$mailersendFromEmail = $_ENV['MAILERSEND_FROM_EMAIL'] ?? 'noreply@dropx.com';
+$mailersendFromName = $_ENV['MAILERSEND_FROM_NAME'] ?? 'DropX Delivery';
+
+/*********************************
+ * SMS CONFIGURATION (FROM .env - for future use)
+ *********************************/
+$africastalkingUsername = $_ENV['AFRICASTALKING_USERNAME'] ?? 'sandbox';
+$africastalkingApiKey = $_ENV['AFRICASTALKING_API_KEY'] ?? '';
+$africastalkingFrom = $_ENV['AFRICASTALKING_FROM'] ?? 'DropX';
 
 /*********************************
  * SEND EMAIL USING MAILERSEND
@@ -57,8 +79,8 @@ function sendEmailVerificationCode($email, $code) {
     error_log("📧 Sending verification code to $email: $code");
     
     // Check if API key is configured
-    if (empty($mailersendApiKey) || $mailersendApiKey === 'mlsn.your_api_key_here') {
-        error_log("⚠️ MailerSend not configured. Please add your API key.");
+    if (empty($mailersendApiKey)) {
+        error_log("⚠️ MailerSend API key not configured in .env file");
         return false;
     }
     
@@ -127,7 +149,7 @@ function sendEmailVerificationCode($email, $code) {
 function sendPasswordResetEmail($email, $resetLink) {
     global $mailersendApiKey, $mailersendFromEmail, $mailersendFromName;
     
-    if (empty($mailersendApiKey) || $mailersendApiKey === 'mlsn.your_api_key_here') {
+    if (empty($mailersendApiKey)) {
         error_log("⚠️ MailerSend not configured.");
         return false;
     }
@@ -182,10 +204,11 @@ function sendPasswordResetEmail($email, $resetLink) {
             ->setText("Reset your password: $resetLink\n\nThis link expires in 1 hour.");
         
         $mailersend->email->send($emailParams);
+        error_log("✅ Password reset email sent to $email");
         return true;
         
     } catch (Exception $e) {
-        error_log("Password reset email failed: " . $e->getMessage());
+        error_log("❌ Password reset email failed: " . $e->getMessage());
         return false;
     }
 }
@@ -605,7 +628,7 @@ function verifyEmail($conn, $data) {
 }
 
 /*********************************
- * PHONE VERIFICATION FUNCTIONS (Development Mode - Returns Code)
+ * PHONE VERIFICATION FUNCTIONS
  *********************************/
 function checkPhoneVerificationStatus($conn, $data) {
     $phone = cleanPhoneNumber($data['phone'] ?? '');
@@ -664,14 +687,13 @@ function sendPhoneVerification($conn, $data) {
         ':expires_at' => $expiresAt
     ]);
     
-    // For development - return the code
-    // Replace this with actual SMS API when ready
+    // For now, return the code (SMS will be implemented later)
     error_log("📱 SMS VERIFICATION CODE FOR $phone: $verificationCode");
     
     ResponseHandler::success([
         'code' => $verificationCode,
         'expires_in' => 300
-    ], 'Verification code generated (SMS will be implemented in production)');
+    ], 'Verification code generated');
 }
 
 function verifyPhone($conn, $data) {
