@@ -5,7 +5,7 @@
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Credentials: true");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-Device-ID, X-Platform, X-App-Version");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-Session-Token, X-Device-ID, X-Platform, X-App-Version");
 header("Content-Type: application/json; charset=UTF-8");
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -84,6 +84,28 @@ try {
             ? filter_var($queryParams['include_add_ons'], FILTER_VALIDATE_BOOLEAN)
             : true;
         getMerchantMenu($conn, $merchantId, $baseUrl, $includeVariants, $includeAddOns);
+        exit();
+    }
+    
+    // Merchant menu items with add-ons endpoint
+    if ($method === 'GET' && preg_match('#/merchants\.php/(\d+)/menu/(\d+)/add-ons$#', $path, $matches)) {
+        $merchantId = intval($matches[1]);
+        $menuItemId = intval($matches[2]);
+        getMenuItemAddOns($conn, $merchantId, $menuItemId, $baseUrl);
+        exit();
+    }
+    
+    // Merchant global add-ons endpoint
+    if ($method === 'GET' && preg_match('#/merchants\.php/(\d+)/add-ons$#', $path, $matches)) {
+        $merchantId = intval($matches[1]);
+        getMerchantAddOns($conn, $merchantId, $baseUrl);
+        exit();
+    }
+    
+    // Merchant add-on categories endpoint
+    if ($method === 'GET' && preg_match('#/merchants\.php/(\d+)/add-on-categories$#', $path, $matches)) {
+        $merchantId = intval($matches[1]);
+        getMerchantAddOnCategories($conn, $merchantId, $baseUrl);
         exit();
     }
     
@@ -209,9 +231,21 @@ try {
         exit();
     }
     
+    // Add-On specific POST endpoints
+    if ($method === 'POST' && preg_match('#/merchants\.php/add-ons/validate$#', $path)) {
+        validateAddOns($conn);
+        exit();
+    }
+    
+    if ($method === 'POST' && preg_match('#/merchants\.php/add-ons/calculate-price$#', $path)) {
+        calculateAddOnsPrice($conn);
+        exit();
+    }
+    
     ResponseHandler::error('Endpoint not found', 404);
     
 } catch (Exception $e) {
+    error_log("Merchants API Error: " . $e->getMessage());
     ResponseHandler::error('Server error', 500);
 }
 
@@ -462,7 +496,7 @@ function getMerchantDetails($conn, $merchantId, $baseUrl) {
 }
 
 /*********************************
- * GET MERCHANT MENU
+ * GET MERCHANT MENU (WITH ADD-ONS)
  *********************************/
 function getMerchantMenu($conn, $merchantId, $baseUrl, $includeVariants = true, $includeAddOns = true) {
     $checkStmt = $conn->prepare(
@@ -512,6 +546,12 @@ function getMerchantMenu($conn, $merchantId, $baseUrl, $includeVariants = true, 
     $menuStmt->execute([':merchant_id' => $merchantId]);
     $menuItems = $menuStmt->fetchAll(PDO::FETCH_ASSOC);
 
+    // Also get global merchant add-ons that apply to all items
+    $globalAddOns = [];
+    if ($includeAddOns) {
+        $globalAddOns = getGlobalMerchantAddOns($conn, $merchantId, $baseUrl);
+    }
+
     $categories = [];
     $totalItems = 0;
     
@@ -528,7 +568,14 @@ function getMerchantMenu($conn, $merchantId, $baseUrl, $includeVariants = true, 
             ];
         }
         
-        $categories[$categoryName]['items'][] = formatMenuItemData($item, $baseUrl);
+        $formattedItem = formatMenuItemData($item, $baseUrl);
+        
+        // Add global add-ons to each item if they don't have item-specific add-ons
+        if ($includeAddOns && empty($formattedItem['add_ons'])) {
+            $formattedItem['add_ons'] = $globalAddOns;
+        }
+        
+        $categories[$categoryName]['items'][] = $formattedItem;
         $totalItems++;
     }
     
@@ -539,8 +586,229 @@ function getMerchantMenu($conn, $merchantId, $baseUrl, $includeVariants = true, 
         'merchant_name' => $merchant['name'],
         'business_type' => $merchant['business_type'],
         'menu' => $menuList,
+        'global_add_ons' => $globalAddOns,
         'total_items' => $totalItems,
         'total_categories' => count($menuList)
+    ]);
+}
+
+/*********************************
+ * GET MENU ITEM ADD-ONS (SPECIFIC TO ITEM)
+ *********************************/
+function getMenuItemAddOns($conn, $merchantId, $menuItemId, $baseUrl) {
+    // Check if merchant exists
+    $checkStmt = $conn->prepare(
+        "SELECT id FROM merchants WHERE id = :id AND is_active = 1"
+    );
+    $checkStmt->execute([':id' => $merchantId]);
+    
+    if (!$checkStmt->fetch()) {
+        ResponseHandler::error('Merchant not found', 404);
+    }
+    
+    // Get menu item add-ons
+    $stmt = $conn->prepare(
+        "SELECT 
+            mao.id,
+            mao.name,
+            mao.description,
+            mao.price,
+            mao.category,
+            mao.is_per_item,
+            mao.max_quantity,
+            mao.is_required,
+            mao.is_available,
+            mao.compatible_with,
+            mao.sort_order,
+            maoc.name as category_name,
+            maoc.max_selectable as category_max_selectable
+        FROM merchant_add_ons mao
+        LEFT JOIN merchant_add_on_categories maoc ON mao.category_id = maoc.id
+        WHERE mao.menu_item_id = :menu_item_id
+        AND mao.merchant_id = :merchant_id
+        AND mao.is_available = 1
+        ORDER BY maoc.sort_order, mao.sort_order, mao.price ASC"
+    );
+    
+    $stmt->execute([
+        ':menu_item_id' => $menuItemId,
+        ':merchant_id' => $merchantId
+    ]);
+    
+    $addOns = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Group by category
+    $groupedAddOns = [];
+    foreach ($addOns as $addOn) {
+        $catKey = $addOn['category'] ?? 'uncategorized';
+        $catName = $addOn['category_name'] ?? $addOn['category'] ?? 'Other Options';
+        
+        if (!isset($groupedAddOns[$catKey])) {
+            $groupedAddOns[$catKey] = [
+                'category_id' => $addOn['category'],
+                'category_name' => $catName,
+                'max_selectable' => intval($addOn['category_max_selectable'] ?? 10),
+                'is_required' => (bool)$addOn['is_required'],
+                'add_ons' => []
+            ];
+        }
+        
+        $groupedAddOns[$catKey]['add_ons'][] = formatAddOnData($addOn, $baseUrl);
+    }
+    
+    ResponseHandler::success([
+        'merchant_id' => $merchantId,
+        'menu_item_id' => $menuItemId,
+        'add_ons' => array_values($groupedAddOns),
+        'total_add_ons' => count($addOns)
+    ]);
+}
+
+/*********************************
+ * GET MERCHANT ADD-ONS (GLOBAL)
+ *********************************/
+function getMerchantAddOns($conn, $merchantId, $baseUrl) {
+    // Check if merchant exists
+    $checkStmt = $conn->prepare(
+        "SELECT id, name FROM merchants WHERE id = :id AND is_active = 1"
+    );
+    $checkStmt->execute([':id' => $merchantId]);
+    $merchant = $checkStmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$merchant) {
+        ResponseHandler::error('Merchant not found', 404);
+    }
+    
+    $category = $_GET['category'] ?? null;
+    $page = max(1, intval($_GET['page'] ?? 1));
+    $limit = min(100, max(1, intval($_GET['limit'] ?? 50)));
+    $offset = ($page - 1) * $limit;
+    
+    $whereConditions = [
+        "mao.merchant_id = :merchant_id",
+        "mao.is_available = 1",
+        "(mao.menu_item_id IS NULL OR mao.menu_item_id = 0)"
+    ];
+    $params = [':merchant_id' => $merchantId];
+    
+    if ($category) {
+        $whereConditions[] = "mao.category = :category";
+        $params[':category'] = $category;
+    }
+    
+    $whereClause = "WHERE " . implode(" AND ", $whereConditions);
+    
+    // Get total count
+    $countSql = "SELECT COUNT(*) as total FROM merchant_add_ons mao $whereClause";
+    $countStmt = $conn->prepare($countSql);
+    $countStmt->execute($params);
+    $totalCount = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
+    
+    // Get add-ons with category info
+    $sql = "SELECT 
+                mao.id,
+                mao.name,
+                mao.description,
+                mao.price,
+                mao.category,
+                mao.is_per_item,
+                mao.max_quantity,
+                mao.is_required,
+                mao.is_available,
+                mao.compatible_with,
+                mao.sort_order,
+                maoc.name as category_name,
+                maoc.max_selectable as category_max_selectable,
+                maoc.is_required as category_required
+            FROM merchant_add_ons mao
+            LEFT JOIN merchant_add_on_categories maoc ON mao.category_id = maoc.id
+            $whereClause
+            ORDER BY maoc.sort_order, mao.sort_order, mao.price ASC
+            LIMIT :limit OFFSET :offset";
+    
+    $stmt = $conn->prepare($sql);
+    $params[':limit'] = $limit;
+    $params[':offset'] = $offset;
+    
+    foreach ($params as $key => $value) {
+        if ($key === ':limit' || $key === ':offset') {
+            $stmt->bindValue($key, $value, PDO::PARAM_INT);
+        } else {
+            $stmt->bindValue($key, $value);
+        }
+    }
+    
+    $stmt->execute();
+    $addOns = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Group by category
+    $groupedAddOns = [];
+    foreach ($addOns as $addOn) {
+        $catKey = $addOn['category'] ?? 'uncategorized';
+        $catName = $addOn['category_name'] ?? $addOn['category'] ?? 'Other Options';
+        
+        if (!isset($groupedAddOns[$catKey])) {
+            $groupedAddOns[$catKey] = [
+                'category_id' => $addOn['category'],
+                'category_name' => $catName,
+                'max_selectable' => intval($addOn['category_max_selectable'] ?? 10),
+                'is_required' => (bool)($addOn['category_required'] ?? $addOn['is_required'] ?? false),
+                'add_ons' => []
+            ];
+        }
+        
+        $groupedAddOns[$catKey]['add_ons'][] = formatAddOnData($addOn, $baseUrl);
+    }
+    
+    ResponseHandler::success([
+        'merchant_id' => $merchantId,
+        'merchant_name' => $merchant['name'],
+        'add_ons' => array_values($groupedAddOns),
+        'pagination' => [
+            'current_page' => $page,
+            'per_page' => $limit,
+            'total_items' => $totalCount,
+            'total_pages' => ceil($totalCount / $limit)
+        ]
+    ]);
+}
+
+/*********************************
+ * GET MERCHANT ADD-ON CATEGORIES
+ *********************************/
+function getMerchantAddOnCategories($conn, $merchantId, $baseUrl) {
+    $stmt = $conn->prepare(
+        "SELECT 
+            id,
+            name,
+            description,
+            max_selectable,
+            is_required,
+            sort_order,
+            is_active
+        FROM merchant_add_on_categories
+        WHERE merchant_id = :merchant_id
+        AND is_active = 1
+        ORDER BY sort_order, name"
+    );
+    
+    $stmt->execute([':merchant_id' => $merchantId]);
+    $categories = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    foreach ($categories as &$category) {
+        // Get count of add-ons in this category
+        $countStmt = $conn->prepare(
+            "SELECT COUNT(*) as count FROM merchant_add_ons 
+             WHERE category_id = :category_id AND is_available = 1"
+        );
+        $countStmt->execute([':category_id' => $category['id']]);
+        $category['add_on_count'] = intval($countStmt->fetch(PDO::FETCH_ASSOC)['count']);
+    }
+    
+    ResponseHandler::success([
+        'merchant_id' => $merchantId,
+        'categories' => $categories,
+        'total_categories' => count($categories)
     ]);
 }
 
@@ -959,6 +1227,202 @@ function getMerchantStats($conn, $merchantId, $baseUrl) {
 }
 
 /*********************************
+ * VALIDATE ADD-ONS
+ *********************************/
+function validateAddOns($conn) {
+    $userId = getCurrentUserId();
+    $input = json_decode(file_get_contents('php://input'), true);
+    
+    $merchantId = $input['merchant_id'] ?? null;
+    $menuItemId = $input['menu_item_id'] ?? null;
+    $selectedAddOns = $input['selected_add_ons'] ?? [];
+    
+    if (!$merchantId) {
+        ResponseHandler::error('Merchant ID is required', 400);
+    }
+    
+    if (!$menuItemId) {
+        ResponseHandler::error('Menu item ID is required', 400);
+    }
+    
+    $validation = [
+        'valid' => true,
+        'errors' => [],
+        'warnings' => [],
+        'selected_add_ons' => [],
+        'total_add_on_price' => 0,
+        'add_on_counts' => []
+    ];
+    
+    // Get all available add-ons for this menu item
+    $stmt = $conn->prepare(
+        "SELECT 
+            mao.id,
+            mao.name,
+            mao.price,
+            mao.category,
+            mao.is_per_item,
+            mao.max_quantity,
+            mao.is_required,
+            mao.compatible_with
+        FROM merchant_add_ons mao
+        WHERE (mao.menu_item_id = :menu_item_id OR mao.menu_item_id IS NULL)
+        AND mao.merchant_id = :merchant_id
+        AND mao.is_available = 1"
+    );
+    
+    $stmt->execute([
+        ':menu_item_id' => $menuItemId,
+        ':merchant_id' => $merchantId
+    ]);
+    
+    $availableAddOns = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $availableMap = [];
+    $requiredAddOns = [];
+    $categoryCounts = [];
+    
+    foreach ($availableAddOns as $addOn) {
+        $availableMap[$addOn['id']] = $addOn;
+        if ($addOn['is_required']) {
+            $requiredAddOns[] = $addOn['id'];
+        }
+    }
+    
+    // Check for required add-ons
+    $selectedIds = array_column($selectedAddOns, 'id');
+    $missingRequired = array_diff($requiredAddOns, $selectedIds);
+    
+    if (!empty($missingRequired)) {
+        $validation['valid'] = false;
+        foreach ($missingRequired as $missingId) {
+            $validation['errors'][] = "Required add-on: " . ($availableMap[$missingId]['name'] ?? 'Unknown') . " is missing";
+        }
+    }
+    
+    // Validate each selected add-on
+    foreach ($selectedAddOns as $selected) {
+        $addOnId = $selected['id'] ?? null;
+        $quantity = intval($selected['quantity'] ?? 1);
+        
+        if (!$addOnId || !isset($availableMap[$addOnId])) {
+            $validation['valid'] = false;
+            $validation['errors'][] = "Invalid add-on selected";
+            continue;
+        }
+        
+        $addOn = $availableMap[$addOnId];
+        
+        // Check quantity limits
+        $maxQty = $addOn['max_quantity'] ?? 10;
+        if ($quantity > $maxQty) {
+            $validation['valid'] = false;
+            $validation['errors'][] = "Maximum quantity for {$addOn['name']} is $maxQty";
+        }
+        
+        if ($quantity < 1) {
+            $validation['valid'] = false;
+            $validation['errors'][] = "Invalid quantity for {$addOn['name']}";
+        }
+        
+        // Track category counts
+        $category = $addOn['category'] ?? 'default';
+        if (!isset($categoryCounts[$category])) {
+            $categoryCounts[$category] = 0;
+        }
+        $categoryCounts[$category] += $quantity;
+        
+        $price = floatval($addOn['price']);
+        $totalPrice = $price * $quantity;
+        
+        $validation['selected_add_ons'][] = [
+            'id' => $addOnId,
+            'name' => $addOn['name'],
+            'price' => $price,
+            'quantity' => $quantity,
+            'total' => $totalPrice,
+            'category' => $category,
+            'is_per_item' => (bool)$addOn['is_per_item']
+        ];
+        
+        $validation['total_add_on_price'] += $totalPrice;
+    }
+    
+    $validation['add_on_counts'] = $categoryCounts;
+    
+    ResponseHandler::success($validation);
+}
+
+/*********************************
+ * CALCULATE ADD-ONS PRICE
+ *********************************/
+function calculateAddOnsPrice($conn) {
+    $input = json_decode(file_get_contents('php://input'), true);
+    
+    $merchantId = $input['merchant_id'] ?? null;
+    $menuItemId = $input['menu_item_id'] ?? null;
+    $selectedAddOns = $input['selected_add_ons'] ?? [];
+    $quantity = max(1, intval($input['quantity'] ?? 1));
+    
+    if (!$merchantId) {
+        ResponseHandler::error('Merchant ID is required', 400);
+    }
+    
+    if (!$menuItemId && empty($selectedAddOns)) {
+        ResponseHandler::error('Menu item ID or selected add-ons required', 400);
+    }
+    
+    $totalAddOnPrice = 0;
+    $addOnDetails = [];
+    
+    if (!empty($selectedAddOns)) {
+        $placeholders = implode(',', array_fill(0, count($selectedAddOns), '?'));
+        $addOnIds = array_column($selectedAddOns, 'id');
+        
+        $stmt = $conn->prepare(
+            "SELECT id, name, price, is_per_item FROM merchant_add_ons 
+             WHERE id IN ($placeholders) AND merchant_id = ?"
+        );
+        
+        $params = array_merge($addOnIds, [$merchantId]);
+        $stmt->execute($params);
+        $addOns = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        $addOnMap = [];
+        foreach ($addOns as $addOn) {
+            $addOnMap[$addOn['id']] = $addOn;
+        }
+        
+        foreach ($selectedAddOns as $selected) {
+            $addOnId = $selected['id'];
+            $selectedQty = intval($selected['quantity'] ?? 1);
+            
+            if (isset($addOnMap[$addOnId])) {
+                $addOn = $addOnMap[$addOnId];
+                $itemQty = $addOn['is_per_item'] ? $selectedQty * $quantity : $selectedQty;
+                $price = floatval($addOn['price']) * $itemQty;
+                
+                $totalAddOnPrice += $price;
+                $addOnDetails[] = [
+                    'id' => $addOnId,
+                    'name' => $addOn['name'],
+                    'price' => floatval($addOn['price']),
+                    'quantity' => $selectedQty,
+                    'total' => $price,
+                    'is_per_item' => (bool)$addOn['is_per_item']
+                ];
+            }
+        }
+    }
+    
+    ResponseHandler::success([
+        'total_add_on_price' => $totalAddOnPrice,
+        'formatted_total' => 'MK ' . number_format($totalAddOnPrice, 2),
+        'add_ons' => $addOnDetails,
+        'quantity' => $quantity
+    ]);
+}
+
+/*********************************
  * POST REQUEST HANDLER
  *********************************/
 function handlePostRequest($conn, $baseUrl) {
@@ -1262,6 +1726,34 @@ function isAdmin($conn, $userId) {
     return $user && ($user['is_admin'] == 1);
 }
 
+function getGlobalMerchantAddOns($conn, $merchantId, $baseUrl) {
+    $stmt = $conn->prepare(
+        "SELECT 
+            mao.id,
+            mao.name,
+            mao.description,
+            mao.price,
+            mao.category,
+            mao.is_per_item,
+            mao.max_quantity,
+            mao.is_required,
+            mao.is_available,
+            mao.sort_order
+        FROM merchant_add_ons mao
+        WHERE mao.merchant_id = :merchant_id
+        AND (mao.menu_item_id IS NULL OR mao.menu_item_id = 0)
+        AND mao.is_available = 1
+        ORDER BY mao.sort_order, mao.price ASC"
+    );
+    
+    $stmt->execute([':merchant_id' => $merchantId]);
+    $addOns = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    return array_map(function($addOn) use ($baseUrl) {
+        return formatAddOnData($addOn, $baseUrl);
+    }, $addOns);
+}
+
 /*********************************
  * FORMATTING FUNCTIONS
  *********************************/
@@ -1473,6 +1965,37 @@ function formatMenuItemData($item, $baseUrl) {
         'stock_quantity' => $item['stock_quantity'] !== null ? intval($item['stock_quantity']) : null,
         'in_stock' => ($item['stock_quantity'] === null || $item['stock_quantity'] > 0) && $item['is_available'],
         'sort_order' => intval($item['sort_order'])
+    ];
+}
+
+function formatAddOnData($addOn, $baseUrl) {
+    // Parse compatible_with if it's a JSON string
+    $compatibleWith = [];
+    if (!empty($addOn['compatible_with'])) {
+        if (is_array($addOn['compatible_with'])) {
+            $compatibleWith = $addOn['compatible_with'];
+        } else if (is_string($addOn['compatible_with'])) {
+            $decoded = json_decode($addOn['compatible_with'], true);
+            if (is_array($decoded)) {
+                $compatibleWith = $decoded;
+            }
+        }
+    }
+    
+    return [
+        'id' => intval($addOn['id']),
+        'name' => $addOn['name'] ?? '',
+        'description' => $addOn['description'] ?? '',
+        'price' => floatval($addOn['price'] ?? 0),
+        'formatted_price' => 'MK ' . number_format(floatval($addOn['price'] ?? 0), 2),
+        'category' => $addOn['category'] ?? 'other',
+        'category_name' => $addOn['category_name'] ?? $addOn['category'] ?? 'Other Options',
+        'is_per_item' => (bool)($addOn['is_per_item'] ?? true),
+        'max_quantity' => intval($addOn['max_quantity'] ?? 10),
+        'is_required' => (bool)($addOn['is_required'] ?? false),
+        'is_available' => (bool)($addOn['is_available'] ?? true),
+        'compatible_with' => $compatibleWith,
+        'sort_order' => intval($addOn['sort_order'] ?? 0)
     ];
 }
 ?>
