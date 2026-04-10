@@ -807,49 +807,82 @@ function getAddresses($conn, $data) {
 }
 
 function createAddress($conn, $data) {
+    // Debug logging
+    error_log("=== CREATE ADDRESS DEBUG ===");
+    error_log("Session user_id: " . ($_SESSION['user_id'] ?? 'NOT SET'));
+    error_log("Input data: " . json_encode($data));
+    
     if (empty($_SESSION['user_id'])) {
         ResponseHandler::error('Unauthorized', 401);
     }
     
     // Validate required fields
     if (empty($data['latitude']) || empty($data['longitude'])) {
+        error_log("ERROR: Missing lat/lng. Latitude: " . ($data['latitude'] ?? 'null') . ", Longitude: " . ($data['longitude'] ?? 'null'));
         ResponseHandler::error('Latitude and longitude are required', 400);
     }
     
-    $stmt = $conn->prepare(
-        "INSERT INTO addresses (user_id, place_id, formatted_address, latitude, longitude, label, created_at, updated_at)
-         VALUES (:user_id, :place_id, :formatted_address, :latitude, :longitude, :label, NOW(), NOW())"
-    );
-    
-    $stmt->execute([
-        ':user_id' => $_SESSION['user_id'],
-        ':place_id' => $data['place_id'] ?? null,
-        ':formatted_address' => $data['formatted_address'] ?? null,
-        ':latitude' => $data['latitude'],
-        ':longitude' => $data['longitude'],
-        ':label' => $data['label'] ?? 'Home'
-    ]);
-    
-    $addressId = $conn->lastInsertId();
-    
-    // Return the created address
-    $stmt = $conn->prepare(
-        "SELECT id, place_id, formatted_address, latitude, longitude, label, created_at, updated_at
-         FROM addresses WHERE id = :id AND user_id = :user_id"
-    );
-    $stmt->execute([
-        ':id' => $addressId,
-        ':user_id' => $_SESSION['user_id']
-    ]);
-    $address = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    if ($address) {
-        $address['map_link'] = "https://www.google.com/maps?q={$address['latitude']},{$address['longitude']}";
+    // Validate label (must be Home, Work, or Other)
+    $label = $data['label'] ?? 'Home';
+    $validLabels = ['Home', 'Work', 'Other'];
+    if (!in_array($label, $validLabels)) {
+        $label = 'Home';
     }
     
-    ResponseHandler::success([
-        'address' => $address
-    ], 'Address saved successfully', 201);
+    try {
+        $stmt = $conn->prepare(
+            "INSERT INTO addresses (user_id, place_id, formatted_address, latitude, longitude, label, created_at, updated_at)
+             VALUES (:user_id, :place_id, :formatted_address, :latitude, :longitude, :label, NOW(), NOW())"
+        );
+        
+        $result = $stmt->execute([
+            ':user_id' => $_SESSION['user_id'],
+            ':place_id' => $data['place_id'] ?? null,
+            ':formatted_address' => $data['formatted_address'] ?? null,
+            ':latitude' => $data['latitude'],
+            ':longitude' => $data['longitude'],
+            ':label' => $label
+        ]);
+        
+        error_log("SQL Execute result: " . ($result ? 'TRUE' : 'FALSE'));
+        
+        if (!$result) {
+            error_log("PDO Error Info: " . json_encode($stmt->errorInfo()));
+            ResponseHandler::error('Database error: Failed to insert address', 500);
+        }
+        
+        $addressId = $conn->lastInsertId();
+        error_log("Last insert ID: " . $addressId);
+        
+        if (!$addressId) {
+            ResponseHandler::error('Failed to save address', 500);
+        }
+        
+        // Return the created address
+        $stmt = $conn->prepare(
+            "SELECT id, place_id, formatted_address, latitude, longitude, label, created_at, updated_at
+             FROM addresses WHERE id = :id AND user_id = :user_id"
+        );
+        $stmt->execute([
+            ':id' => $addressId,
+            ':user_id' => $_SESSION['user_id']
+        ]);
+        $address = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($address) {
+            $address['map_link'] = "https://www.google.com/maps?q={$address['latitude']},{$address['longitude']}";
+        }
+        
+        error_log("Address saved successfully: " . json_encode($address));
+        
+        ResponseHandler::success([
+            'address' => $address
+        ], 'Address saved successfully', 201);
+        
+    } catch (PDOException $e) {
+        error_log("PDO Exception: " . $e->getMessage());
+        ResponseHandler::error('Database error: ' . $e->getMessage(), 500);
+    }
 }
 
 function deleteAddress($conn, $data) {
