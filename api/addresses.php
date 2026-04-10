@@ -1,12 +1,12 @@
 <?php
 /*********************************
  * MALAWI DELIVERY ADDRESS API
- * Hybrid Address System (GPS + Description)
+ * Google Maps Only - Simplified
  *********************************/
 
 header("Access-Control-Allow-Origin: *");
-header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization");
+header("Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-User-Id");
 header("Content-Type: application/json");
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -28,7 +28,14 @@ function response($data, $status = 200) {
 }
 
 /*********************************
- * HELPER: GOOGLE API
+ * HELPER: GET USER ID
+ *********************************/
+function getUserId() {
+    return $_SERVER['HTTP_X_USER_ID'] ?? null;
+}
+
+/*********************************
+ * HELPER: CALL GOOGLE API
  *********************************/
 function callGoogleAPI($url) {
     $ch = curl_init($url);
@@ -43,128 +50,59 @@ function callGoogleAPI($url) {
 }
 
 /*********************************
- * SMART GEOCODING (MALAWI LOGIC)
+ * CREATE ADDRESS TABLE IF NOT EXISTS
  *********************************/
-function smartGeocode($input) {
-
-    $queries = [];
-
-    if (!empty($input['landmark'])) {
-        $queries[] = "{$input['landmark']}, {$input['primary_location']}, Lilongwe, Malawi";
-    }
-
-    if (!empty($input['street'])) {
-        $queries[] = "{$input['street']}, {$input['primary_location']}, Lilongwe";
-    }
-
-    $queries[] = "{$input['primary_location']}, Lilongwe, Malawi";
-
-    foreach ($queries as $q) {
-        $url = "https://maps.googleapis.com/maps/api/geocode/json?address=" . urlencode($q) . "&key=" . GOOGLE_MAPS_API_KEY;
-
-        $res = callGoogleAPI($url);
-
-        if ($res && $res['status'] === 'OK') {
-            return [
-                'lat' => $res['results'][0]['geometry']['location']['lat'],
-                'lng' => $res['results'][0]['geometry']['location']['lng'],
-                'place_id' => $res['results'][0]['place_id']
-            ];
-        }
-    }
-
-    return null;
-}
-
-/*********************************
- * FORMAT ADDRESS (DRIVER VIEW)
- *********************************/
-function formatAddress($a) {
-    $parts = [];
-
-    if (!empty($a['primary_location'])) {
-        $parts[] = $a['primary_location'];
-    }
-
-    if (!empty($a['sub_area'])) {
-        $parts[] = $a['sub_area'];
-    }
-
-    if (!empty($a['sector'])) {
-        $parts[] = $a['sector'];
-    }
-
-    if (!empty($a['street'])) {
-        $parts[] = $a['street'];
-    }
-
-    if (!empty($a['landmark'])) {
-        $parts[] = "Near " . $a['landmark'];
-    }
-
-    if (!empty($a['notes'])) {
-        $parts[] = $a['notes'];
-    }
-
-    return implode(', ', $parts) . ", Lilongwe";
-}
-
-/*********************************
- * AUTH (SIMPLE)
- *********************************/
-function getUserId() {
-    return $_SERVER['HTTP_X_USER_ID'] ?? null;
+function createTableIfNotExists($conn) {
+    $sql = "
+    CREATE TABLE IF NOT EXISTS addresses (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        place_id VARCHAR(255) NULL,
+        formatted_address TEXT NULL,
+        latitude DECIMAL(10, 7) NOT NULL,
+        longitude DECIMAL(10, 7) NOT NULL,
+        label VARCHAR(50) DEFAULT 'Home',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_user_id (user_id)
+    )";
+    $conn->exec($sql);
 }
 
 /*********************************
  * CREATE ADDRESS
  *********************************/
 function createAddress($conn, $input) {
-
     $userId = getUserId();
-    if (!$userId) response(['error' => 'Unauthorized'], 401);
-
-    if (empty($input['primary_location'])) {
-        response(['error' => 'Primary location required'], 400);
+    if (!$userId) {
+        response(['success' => false, 'error' => 'Unauthorized'], 401);
     }
 
-    $lat = $input['latitude'] ?? null;
-    $lng = $input['longitude'] ?? null;
-
-    // PRIORITY: GPS FIRST
-    if (!$lat || !$lng) {
-        $coords = smartGeocode($input);
-
-        if ($coords) {
-            $lat = $coords['lat'];
-            $lng = $coords['lng'];
-        } else {
-            response(['error' => 'Move map pin to exact location'], 400);
-        }
+    // Validate required fields
+    if (empty($input['latitude']) || empty($input['longitude'])) {
+        response(['success' => false, 'error' => 'Latitude and longitude are required'], 400);
     }
 
     $stmt = $conn->prepare("
         INSERT INTO addresses 
-        (user_id, primary_location, sub_area, sector, street, landmark, notes, latitude, longitude, label)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (user_id, place_id, formatted_address, latitude, longitude, label)
+        VALUES (?, ?, ?, ?, ?, ?)
     ");
 
     $stmt->execute([
         $userId,
-        $input['primary_location'],
-        $input['sub_area'] ?? null,
-        $input['sector'] ?? null,
-        $input['street'] ?? null,
-        $input['landmark'] ?? null,
-        $input['notes'] ?? null,
-        $lat,
-        $lng,
+        $input['place_id'] ?? null,
+        $input['formatted_address'] ?? null,
+        $input['latitude'],
+        $input['longitude'],
         $input['label'] ?? 'Home'
     ]);
 
+    $id = $conn->lastInsertId();
+
     response([
-        'message' => 'Address saved',
-        'id' => $conn->lastInsertId()
+        'success' => true,
+        'message' => 'Address saved successfully',
+        'id' => $id
     ], 201);
 }
 
@@ -172,120 +110,218 @@ function createAddress($conn, $input) {
  * GET USER ADDRESSES
  *********************************/
 function getAddresses($conn) {
-
     $userId = getUserId();
-    if (!$userId) response(['error' => 'Unauthorized'], 401);
+    if (!$userId) {
+        response(['success' => false, 'error' => 'Unauthorized'], 401);
+    }
 
     $stmt = $conn->prepare("
-        SELECT * FROM addresses 
+        SELECT id, place_id, formatted_address, latitude, longitude, label, created_at
+        FROM addresses 
         WHERE user_id = ? 
         ORDER BY created_at DESC
     ");
-
     $stmt->execute([$userId]);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    foreach ($rows as &$r) {
-        $r['full_address'] = formatAddress($r);
-        $r['map_link'] = "https://www.google.com/maps?q={$r['latitude']},{$r['longitude']}";
+    $addresses = [];
+    foreach ($rows as $row) {
+        $addresses[] = [
+            'id' => $row['id'],
+            'place_id' => $row['place_id'],
+            'formatted_address' => $row['formatted_address'],
+            'latitude' => floatval($row['latitude']),
+            'longitude' => floatval($row['longitude']),
+            'label' => $row['label'],
+            'created_at' => $row['created_at'],
+            'map_link' => "https://www.google.com/maps?q={$row['latitude']},{$row['longitude']}"
+        ];
     }
 
-    response(['addresses' => $rows]);
+    response([
+        'success' => true,
+        'addresses' => $addresses
+    ]);
 }
 
 /*********************************
  * DELETE ADDRESS
  *********************************/
 function deleteAddress($conn, $id) {
-
     $userId = getUserId();
-    if (!$userId) response(['error' => 'Unauthorized'], 401);
+    if (!$userId) {
+        response(['success' => false, 'error' => 'Unauthorized'], 401);
+    }
 
     $stmt = $conn->prepare("DELETE FROM addresses WHERE id = ? AND user_id = ?");
     $stmt->execute([$id, $userId]);
 
-    response(['message' => 'Deleted']);
+    if ($stmt->rowCount() > 0) {
+        response([
+            'success' => true,
+            'message' => 'Address deleted successfully'
+        ]);
+    } else {
+        response([
+            'success' => false,
+            'error' => 'Address not found'
+        ], 404);
+    }
 }
 
 /*********************************
- * AUTOCOMPLETE (LOCAL + GOOGLE)
+ * GOOGLE PLACES AUTOCOMPLETE
  *********************************/
-function autocomplete($conn, $q) {
-
-    if (strlen($q) < 2) {
-        response(['results' => []]);
+function autocompletePlaces($input) {
+    if (strlen($input) < 2) {
+        response(['success' => true, 'suggestions' => []]);
     }
 
-    // LOCAL FIRST
-    $stmt = $conn->prepare("
-        SELECT name FROM locations 
-        WHERE name LIKE ? 
-        LIMIT 5
-    ");
-    $stmt->execute(["%$q%"]);
-    $local = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    $url = "https://maps.googleapis.com/maps/api/place/autocomplete/json?"
+        . "input=" . urlencode($input)
+        . "&components=country:mw"
+        . "&key=" . GOOGLE_MAPS_API_KEY;
 
-    $results = [];
+    $data = callGoogleAPI($url);
+    $suggestions = [];
 
-    foreach ($local as $l) {
-        $results[] = [
-            'name' => $l,
-            'source' => 'local'
-        ];
-    }
-
-    // GOOGLE
-    $url = "https://maps.googleapis.com/maps/api/place/autocomplete/json?input=" . urlencode($q) . "&components=country:mw&key=" . GOOGLE_MAPS_API_KEY;
-
-    $res = callGoogleAPI($url);
-
-    if ($res && $res['status'] === 'OK') {
-        foreach ($res['predictions'] as $p) {
-            $results[] = [
-                'name' => $p['description'],
-                'place_id' => $p['place_id'],
-                'source' => 'google'
+    if ($data && $data['status'] === 'OK') {
+        foreach ($data['predictions'] as $prediction) {
+            $suggestions[] = [
+                'name' => $prediction['description'],
+                'place_id' => $prediction['place_id']
             ];
         }
     }
 
-    response(['results' => $results]);
+    response([
+        'success' => true,
+        'suggestions' => $suggestions
+    ]);
+}
+
+/*********************************
+ * GET PLACE DETAILS FROM PLACE ID
+ *********************************/
+function getPlaceDetails($placeId) {
+    if (empty($placeId)) {
+        response(['success' => false, 'error' => 'Place ID is required'], 400);
+    }
+
+    $url = "https://maps.googleapis.com/maps/api/place/details/json?"
+        . "place_id=" . urlencode($placeId)
+        . "&key=" . GOOGLE_MAPS_API_KEY;
+
+    $data = callGoogleAPI($url);
+
+    if ($data && $data['status'] === 'OK') {
+        $result = $data['result'];
+        response([
+            'success' => true,
+            'place_id' => $result['place_id'],
+            'formatted_address' => $result['formatted_address'],
+            'latitude' => $result['geometry']['location']['lat'],
+            'longitude' => $result['geometry']['location']['lng']
+        ]);
+    } else {
+        response([
+            'success' => false,
+            'error' => 'Failed to get place details'
+        ], 400);
+    }
+}
+
+/*********************************
+ * REVERSE GEOCODE FROM LATITUDE/LONGITUDE
+ *********************************/
+function reverseGeocode($lat, $lng) {
+    if (empty($lat) || empty($lng)) {
+        response(['success' => false, 'error' => 'Latitude and longitude are required'], 400);
+    }
+
+    $url = "https://maps.googleapis.com/maps/api/geocode/json?"
+        . "latlng={$lat},{$lng}"
+        . "&key=" . GOOGLE_MAPS_API_KEY;
+
+    $data = callGoogleAPI($url);
+
+    if ($data && $data['status'] === 'OK' && count($data['results']) > 0) {
+        $result = $data['results'][0];
+        response([
+            'success' => true,
+            'formatted_address' => $result['formatted_address'],
+            'place_id' => $result['place_id'],
+            'latitude' => floatval($lat),
+            'longitude' => floatval($lng)
+        ]);
+    } else {
+        response([
+            'success' => false,
+            'error' => 'Could not get address for this location'
+        ], 400);
+    }
 }
 
 /*********************************
  * ROUTER
  *********************************/
 try {
-
     $db = new Database();
     $conn = $db->getConnection();
+    
+    // Create table if not exists
+    createTableIfNotExists($conn);
 
     $method = $_SERVER['REQUEST_METHOD'];
 
+    // GET requests
     if ($method === 'GET') {
-
+        // Check for autocomplete
         if (isset($_GET['autocomplete'])) {
-            autocomplete($conn, $_GET['q'] ?? '');
-        } else {
+            autocompletePlaces($_GET['input'] ?? '');
+        } 
+        // Check for place details by place_id
+        elseif (isset($_GET['place_details']) && isset($_GET['place_id'])) {
+            getPlaceDetails($_GET['place_id'] ?? '');
+        }
+        // Check for reverse geocode (lat/lng)
+        elseif (isset($_GET['lat']) && isset($_GET['lng'])) {
+            reverseGeocode($_GET['lat'], $_GET['lng']);
+        }
+        // Default: get user addresses
+        else {
             getAddresses($conn);
         }
-
-    } elseif ($method === 'POST') {
-
+    } 
+    // POST requests
+    elseif ($method === 'POST') {
         $input = json_decode(file_get_contents('php://input'), true);
-        createAddress($conn, $input);
-
-    } elseif ($method === 'DELETE') {
-
+        
+        // Check if it's a place details request
+        if (isset($input['action']) && $input['action'] === 'place_details') {
+            getPlaceDetails($input['place_id'] ?? '');
+        } 
+        // Default: create address
+        else {
+            createAddress($conn, $input);
+        }
+    } 
+    // DELETE requests
+    elseif ($method === 'DELETE') {
         $id = $_GET['id'] ?? null;
-        if (!$id) response(['error' => 'ID required'], 400);
-
+        if (!$id) {
+            response(['success' => false, 'error' => 'Address ID required'], 400);
+        }
         deleteAddress($conn, $id);
-
-    } else {
-        response(['error' => 'Method not allowed'], 405);
+    } 
+    else {
+        response(['success' => false, 'error' => 'Method not allowed'], 405);
     }
 
 } catch (Exception $e) {
-    response(['error' => $e->getMessage()], 500);
+    response([
+        'success' => false, 
+        'error' => $e->getMessage()
+    ], 500);
 }
+?>

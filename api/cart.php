@@ -1,8 +1,7 @@
 <?php
 /*********************************
  * CART API - LOGGED IN USERS ONLY
- * Simplified - Focus on items only
- * Cart ID is used by orders.php for checkout
+ * Enhanced with Add-Ons Support
  *********************************/
 
 ob_start();
@@ -313,7 +312,7 @@ function getOrCreateUserCart($conn, $userId) {
 }
 
 /*********************************
- * GET CURRENT CART - SIMPLIFIED
+ * GET CURRENT CART
  *********************************/
 function getCurrentCart($conn, $userId) {
     $cart = getOrCreateUserCart($conn, $userId);
@@ -348,7 +347,7 @@ function getCurrentCart($conn, $userId) {
 }
 
 /*********************************
- * GET CART ITEMS - SIMPLIFIED
+ * GET CART ITEMS
  *********************************/
 function getCartItems($conn, $userId) {
     $cart = getOrCreateUserCart($conn, $userId);
@@ -361,7 +360,7 @@ function getCartItems($conn, $userId) {
 }
 
 /*********************************
- * GET CART SUMMARY - SIMPLIFIED
+ * GET CART SUMMARY
  *********************************/
 function getCartSummary($conn, $userId) {
     $cart = getOrCreateUserCart($conn, $userId);
@@ -390,7 +389,7 @@ function getCartSummary($conn, $userId) {
 }
 
 /*********************************
- * GET CART ITEM COUNT - SIMPLIFIED
+ * GET CART ITEM COUNT
  *********************************/
 function getCartItemCount($conn, $userId) {
     $cart = getOrCreateUserCart($conn, $userId);
@@ -416,7 +415,7 @@ function getCartItemCount($conn, $userId) {
 }
 
 /*********************************
- * GET CART ITEMS BY CART ID - SIMPLIFIED
+ * GET CART ITEMS BY CART ID
  *********************************/
 function getCartItemsByCartId($conn, $cartId) {
     global $baseUrl;
@@ -436,8 +435,11 @@ function getCartItemsByCartId($conn, $cartId) {
             ci.merchant_id,
             ci.merchant_name,
             ci.variant_name,
+            ci.variant_data,
+            ci.has_variants,
             ci.special_instructions,
-            ci.source_type
+            ci.source_type,
+            ci.quick_order_id
         FROM cart_items ci
         WHERE ci.cart_id = :cart_id
         AND ci.is_active = 1
@@ -452,6 +454,11 @@ function getCartItemsByCartId($conn, $cartId) {
     foreach ($items as &$item) {
         $item['add_ons'] = getCartItemAddOns($conn, $item['id']);
         $item['image_url'] = formatImageUrl($item['image_url'], $baseUrl);
+        
+        // Parse variant data if exists
+        if (!empty($item['variant_data'])) {
+            $item['variant_data'] = json_decode($item['variant_data'], true);
+        }
     }
     
     return $items;
@@ -462,16 +469,23 @@ function getCartItemsByCartId($conn, $cartId) {
  *********************************/
 function getCartItemAddOns($conn, $cartItemId) {
     $stmt = $conn->prepare(
-        "SELECT id, name, price, quantity FROM cart_addons 
+        "SELECT id, name, price, quantity, total FROM cart_addons 
          WHERE cart_item_id = :cart_item_id
          ORDER BY created_at ASC"
     );
     $stmt->execute([':cart_item_id' => $cartItemId]);
-    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $addOns = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Calculate total for each add-on
+    foreach ($addOns as &$addOn) {
+        $addOn['total'] = floatval($addOn['price']) * intval($addOn['quantity']);
+    }
+    
+    return $addOns;
 }
 
 /*********************************
- * ADD ITEM TO CART - SIMPLIFIED
+ * ADD ITEM TO CART (WITH ADD-ONS)
  *********************************/
 function addItemToCart($conn, $data, $userId) {
     global $baseUrl;
@@ -480,6 +494,7 @@ function addItemToCart($conn, $data, $userId) {
     $quantity = intval($data['quantity'] ?? 1);
     $specialInstructions = trim($data['special_instructions'] ?? '');
     $selectedOptions = $data['selected_options'] ?? null;
+    $selectedAddOns = $data['selected_add_ons'] ?? [];
     
     if (!$menuItemId) {
         ResponseHandler::error('Menu item ID is required', 400);
@@ -509,31 +524,94 @@ function addItemToCart($conn, $data, $userId) {
         ResponseHandler::error('Item not available', 404);
     }
     
+    // Calculate add-ons price
+    $addOnsTotal = 0;
+    $processedAddOns = [];
+    
+    if (!empty($selectedAddOns)) {
+        foreach ($selectedAddOns as $addOn) {
+            $addOnId = $addOn['id'] ?? null;
+            $addOnQty = intval($addOn['quantity'] ?? 1);
+            $addOnPrice = floatval($addOn['price'] ?? 0);
+            $addOnName = $addOn['name'] ?? '';
+            
+            // Validate add-on exists and is available
+            if ($addOnId) {
+                $validateStmt = $conn->prepare(
+                    "SELECT id, price, is_available FROM merchant_add_ons 
+                     WHERE id = :id AND merchant_id = :merchant_id AND is_available = 1"
+                );
+                $validateStmt->execute([
+                    ':id' => $addOnId,
+                    ':merchant_id' => $item['merchant_id']
+                ]);
+                $validAddOn = $validateStmt->fetch(PDO::FETCH_ASSOC);
+                
+                if ($validAddOn) {
+                    $addOnPrice = floatval($validAddOn['price']);
+                }
+            }
+            
+            $addOnTotal = $addOnPrice * $addOnQty;
+            $addOnsTotal += $addOnTotal;
+            
+            $processedAddOns[] = [
+                'id' => $addOnId,
+                'name' => $addOnName,
+                'price' => $addOnPrice,
+                'quantity' => $addOnQty,
+                'total' => $addOnTotal
+            ];
+        }
+    }
+    
+    // Calculate variant price if selected
+    $variantPrice = 0;
+    $variantName = null;
+    $variantData = null;
+    
+    if (!empty($selectedOptions['variant'])) {
+        $variant = $selectedOptions['variant'];
+        $variantPrice = floatval($variant['price'] ?? 0);
+        $variantName = $variant['display_name'] ?? $variant['name'] ?? null;
+        $variantData = $variant;
+    }
+    
+    $basePrice = floatval($item['price']) + $variantPrice;
+    $total = $basePrice * $quantity;
+    $grandTotal = $total + ($addOnsTotal * $quantity);
+    
     // Get or create cart
     $cart = getOrCreateUserCart($conn, $userId);
     
-    // Check if item already in cart
+    // Check if item already in cart (with same variant and add-ons)
     $existingStmt = $conn->prepare(
         "SELECT id, quantity FROM cart_items 
          WHERE cart_id = :cart_id 
          AND menu_item_id = :item_id
+         AND (variant_id = :variant_id OR (:variant_id IS NULL AND variant_id IS NULL))
          AND is_active = 1"
     );
     
+    $variantId = $variantData['id'] ?? null;
     $existingStmt->execute([
         ':cart_id' => $cart['id'],
-        ':item_id' => $menuItemId
+        ':item_id' => $menuItemId,
+        ':variant_id' => $variantId
     ]);
     $existingItem = $existingStmt->fetch(PDO::FETCH_ASSOC);
     
     if ($existingItem) {
         $newQuantity = $existingItem['quantity'] + $quantity;
+        $newTotal = $basePrice * $newQuantity;
+        $newGrandTotal = $newTotal + ($addOnsTotal * $newQuantity);
         
         $updateStmt = $conn->prepare(
             "UPDATE cart_items 
              SET quantity = :quantity,
-                 total = price * :quantity,
-                 grand_total = (price * :quantity) + add_ons_total,
+                 total = :total,
+                 add_ons_total = :add_ons_total,
+                 grand_total = :grand_total,
                  special_instructions = :instructions,
                  updated_at = NOW()
              WHERE id = :id"
@@ -541,29 +619,39 @@ function addItemToCart($conn, $data, $userId) {
         
         $updateStmt->execute([
             ':quantity' => $newQuantity,
+            ':total' => $newTotal,
+            ':add_ons_total' => $addOnsTotal * $newQuantity,
+            ':grand_total' => $newGrandTotal,
             ':instructions' => $specialInstructions,
             ':id' => $existingItem['id']
         ]);
         
         $cartItemId = $existingItem['id'];
         $message = 'Item quantity updated';
-    } else {
-        $price = floatval($item['price']);
-        $total = $price * $quantity;
         
+        // Remove existing add-ons and add new ones
+        $deleteAddOns = $conn->prepare("DELETE FROM cart_addons WHERE cart_item_id = :item_id");
+        $deleteAddOns->execute([':item_id' => $cartItemId]);
+        
+        if (!empty($processedAddOns)) {
+            addCartItemAddOns($conn, $cartItemId, $processedAddOns, $quantity);
+        }
+    } else {
         $insertStmt = $conn->prepare(
             "INSERT INTO cart_items (
                 cart_id, user_id, menu_item_id, merchant_id, merchant_name,
                 name, description, price, image_url, quantity,
                 total, add_ons_total, grand_total,
                 measurement_type, unit, item_type, category,
+                variant_id, variant_name, variant_data, has_variants,
                 special_instructions, selected_options, source_type,
                 is_active, created_at, updated_at
             ) VALUES (
                 :cart_id, :user_id, :menu_item_id, :merchant_id, :merchant_name,
                 :name, :description, :price, :image_url, :quantity,
-                :total, 0, :total,
+                :total, :add_ons_total, :grand_total,
                 :measurement_type, :unit, :item_type, :category,
+                :variant_id, :variant_name, :variant_data, :has_variants,
                 :instructions, :selected_options, 'menu_item',
                 1, NOW(), NOW()
             )"
@@ -577,20 +665,31 @@ function addItemToCart($conn, $data, $userId) {
             ':merchant_name' => $item['merchant_name'],
             ':name' => $item['name'],
             ':description' => $item['description'],
-            ':price' => $price,
+            ':price' => $basePrice,
             ':image_url' => $item['image_url'],
             ':quantity' => $quantity,
             ':total' => $total,
-            ':measurement_type' => $item['measurement_type'] ?? 'count',
-            ':unit' => $item['unit'] ?? null,
+            ':add_ons_total' => $addOnsTotal * $quantity,
+            ':grand_total' => $grandTotal,
+            ':measurement_type' => $item['unit_type'] ?? 'count',
+            ':unit' => $item['unit_type'] ?? null,
             ':item_type' => $item['item_type'] ?? 'food',
             ':category' => $item['category'] ?? '',
+            ':variant_id' => $variantId,
+            ':variant_name' => $variantName,
+            ':variant_data' => $variantData ? json_encode($variantData) : null,
+            ':has_variants' => $item['has_variants'] ?? 0,
             ':instructions' => $specialInstructions,
             ':selected_options' => $selectedOptions ? json_encode($selectedOptions) : null
         ]);
         
         $cartItemId = $conn->lastInsertId();
         $message = 'Item added to cart';
+        
+        // Add add-ons
+        if (!empty($processedAddOns)) {
+            addCartItemAddOns($conn, $cartItemId, $processedAddOns, $quantity);
+        }
     }
     
     // Update cart timestamp
@@ -617,16 +716,42 @@ function addItemToCart($conn, $data, $userId) {
 }
 
 /*********************************
- * ADD QUICK ORDER TO CART - PROFESSIONAL VERSION
- * Treats quick orders as single combo items
- * No dependency on quick_order_items (optional for display only)
+ * ADD CART ITEM ADD-ONS
+ *********************************/
+function addCartItemAddOns($conn, $cartItemId, $addOns, $quantity) {
+    foreach ($addOns as $addOn) {
+        $addOnName = $addOn['name'] ?? '';
+        $addOnPrice = floatval($addOn['price'] ?? 0);
+        $addOnQty = intval($addOn['quantity'] ?? 1);
+        $addOnTotal = $addOnPrice * $addOnQty * $quantity;
+        
+        $stmt = $conn->prepare(
+            "INSERT INTO cart_addons (
+                cart_item_id, add_on_id, name, price, quantity, total, created_at
+            ) VALUES (
+                :cart_item_id, :add_on_id, :name, :price, :quantity, :total, NOW()
+            )"
+        );
+        
+        $stmt->execute([
+            ':cart_item_id' => $cartItemId,
+            ':add_on_id' => $addOn['id'] ?? null,
+            ':name' => $addOnName,
+            ':price' => $addOnPrice,
+            ':quantity' => $addOnQty * $quantity,
+            ':total' => $addOnTotal
+        ]);
+    }
+}
+
+/*********************************
+ * ADD QUICK ORDER TO CART (WITH ADD-ONS)
  *********************************/
 function addQuickOrderToCart($conn, $data, $userId) {
     global $baseUrl;
     
     // ========== 1. VALIDATE INPUT ==========
     $quickOrderId = $data['quick_order_id'] ?? null;
-    $quickOrderItemId = $data['quick_order_item_id'] ?? null;
     $merchantId = $data['merchant_id'] ?? null;
     $quantity = max(1, intval($data['quantity'] ?? 1));
     $selectedAddOns = $data['selected_add_ons'] ?? [];
@@ -678,33 +803,45 @@ function addQuickOrderToCart($conn, $data, $userId) {
         ResponseHandler::error('Quick order not available for this merchant', 404);
     }
     
-    // ========== 3. GET OPTIONAL ITEMS FOR DISPLAY (NOT REQUIRED FOR CART) ==========
-    // These are for reference only - the combo is treated as 1 item
-    $displayItems = [];
-    if ($quickOrderItemId) {
-        // Get specific item for display reference
-        $itemStmt = $conn->prepare("
-            SELECT 
-                id, name, description, price, image_url,
-                measurement_type, unit, quantity, has_variants, variants_json
-            FROM quick_order_items 
-            WHERE id = :item_id AND quick_order_id = :quick_order_id
-        ");
-        $itemStmt->execute([
-            ':item_id' => $quickOrderItemId,
-            ':quick_order_id' => $quickOrderId
-        ]);
-        $displayItems = $itemStmt->fetchAll(PDO::FETCH_ASSOC);
-    } elseif ($quickOrder['has_variants'] == 0) {
-        // Optionally get all items for display reference (not stored in cart)
-        $itemsStmt = $conn->prepare("
-            SELECT id, name, description, price, image_url, measurement_type, unit, quantity
-            FROM quick_order_items 
-            WHERE quick_order_id = :quick_order_id AND is_available = 1
-            LIMIT 10
-        ");
-        $itemsStmt->execute([':quick_order_id' => $quickOrderId]);
-        $displayItems = $itemsStmt->fetchAll(PDO::FETCH_ASSOC);
+    // ========== 3. CALCULATE ADD-ONS PRICE ==========
+    $addOnsTotal = 0;
+    $processedAddOns = [];
+    
+    if (!empty($selectedAddOns)) {
+        foreach ($selectedAddOns as $addOn) {
+            $addOnId = $addOn['id'] ?? null;
+            $addOnQty = intval($addOn['quantity'] ?? 1);
+            $addOnPrice = floatval($addOn['price'] ?? 0);
+            $addOnName = $addOn['name'] ?? '';
+            
+            // Validate add-on exists and is available
+            if ($addOnId) {
+                $validateStmt = $conn->prepare(
+                    "SELECT id, price, is_available FROM merchant_add_ons 
+                     WHERE id = :id AND merchant_id = :merchant_id AND is_available = 1"
+                );
+                $validateStmt->execute([
+                    ':id' => $addOnId,
+                    ':merchant_id' => $merchantId
+                ]);
+                $validAddOn = $validateStmt->fetch(PDO::FETCH_ASSOC);
+                
+                if ($validAddOn) {
+                    $addOnPrice = floatval($validAddOn['price']);
+                }
+            }
+            
+            $addOnTotal = $addOnPrice * $addOnQty;
+            $addOnsTotal += $addOnTotal;
+            
+            $processedAddOns[] = [
+                'id' => $addOnId,
+                'name' => $addOnName,
+                'price' => $addOnPrice,
+                'quantity' => $addOnQty,
+                'total' => $addOnTotal
+            ];
+        }
     }
     
     // ========== 4. CALCULATE FINAL PRICE ==========
@@ -740,6 +877,8 @@ function addQuickOrderToCart($conn, $data, $userId) {
     
     $finalPrice = $basePrice + $variantPrice;
     $itemTotal = $finalPrice * $quantity;
+    $addOnsTotalForAll = $addOnsTotal * $quantity;
+    $grandTotal = $itemTotal + $addOnsTotalForAll;
     $itemName = $quickOrder['title'] . $variantName;
     
     // ========== 5. GET OR CREATE USER CART ==========
@@ -768,12 +907,15 @@ function addQuickOrderToCart($conn, $data, $userId) {
     if ($existingItem) {
         // Update existing item quantity
         $newQuantity = $existingItem['quantity'] + $quantity;
-        $newTotal = $finalPrice * $newQuantity;
+        $newItemTotal = $finalPrice * $newQuantity;
+        $newAddOnsTotal = $addOnsTotal * $newQuantity;
+        $newGrandTotal = $newItemTotal + $newAddOnsTotal;
         
         $updateStmt = $conn->prepare("
             UPDATE cart_items 
             SET quantity = :quantity,
                 total = :total,
+                add_ons_total = :add_ons_total,
                 grand_total = :grand_total,
                 special_instructions = :instructions,
                 updated_at = NOW()
@@ -782,14 +924,23 @@ function addQuickOrderToCart($conn, $data, $userId) {
         
         $updateStmt->execute([
             ':quantity' => $newQuantity,
-            ':total' => $newTotal,
-            ':grand_total' => $newTotal,
+            ':total' => $newItemTotal,
+            ':add_ons_total' => $newAddOnsTotal,
+            ':grand_total' => $newGrandTotal,
             ':instructions' => $specialInstructions,
             ':id' => $existingItem['id']
         ]);
         
         $cartItemId = $existingItem['id'];
         $message = 'Quick order quantity updated';
+        
+        // Remove existing add-ons and add new ones
+        $deleteAddOns = $conn->prepare("DELETE FROM cart_addons WHERE cart_item_id = :item_id");
+        $deleteAddOns->execute([':item_id' => $cartItemId]);
+        
+        if (!empty($processedAddOns)) {
+            addCartItemAddOns($conn, $cartItemId, $processedAddOns, $newQuantity);
+        }
     } else {
         // Add new combo item to cart as a single item
         $insertStmt = $conn->prepare("
@@ -797,7 +948,7 @@ function addQuickOrderToCart($conn, $data, $userId) {
                 cart_id, user_id, 
                 quick_order_id, merchant_id, merchant_name,
                 name, description, price, image_url, 
-                quantity, total, grand_total,
+                quantity, total, add_ons_total, grand_total,
                 measurement_type, unit, item_type, category,
                 variant_id, variant_data, variant_name, has_variants,
                 special_instructions, source_type,
@@ -806,7 +957,7 @@ function addQuickOrderToCart($conn, $data, $userId) {
                 :cart_id, :user_id,
                 :quick_order_id, :merchant_id, :merchant_name,
                 :name, :description, :price, :image_url,
-                :quantity, :total, :grand_total,
+                :quantity, :total, :add_ons_total, :grand_total,
                 :measurement_type, :unit, :item_type, :category,
                 :variant_id, :variant_data, :variant_name, :has_variants,
                 :instructions, 'quick_order',
@@ -826,7 +977,8 @@ function addQuickOrderToCart($conn, $data, $userId) {
             ':image_url' => $quickOrder['image_url'],
             ':quantity' => $quantity,
             ':total' => $itemTotal,
-            ':grand_total' => $itemTotal,
+            ':add_ons_total' => $addOnsTotalForAll,
+            ':grand_total' => $grandTotal,
             ':measurement_type' => 'combo',
             ':unit' => 'serving',
             ':item_type' => $quickOrder['item_type'] ?? 'quick_order',
@@ -839,13 +991,12 @@ function addQuickOrderToCart($conn, $data, $userId) {
         ]);
         
         $cartItemId = $conn->lastInsertId();
-        
-        // Add add-ons if any (optional)
-        if (!empty($selectedAddOns)) {
-            addCartItemAddOns($conn, $cartItemId, $selectedAddOns, $quantity);
-        }
-        
         $message = 'Quick order added to cart';
+        
+        // Add add-ons
+        if (!empty($processedAddOns)) {
+            addCartItemAddOns($conn, $cartItemId, $processedAddOns, $quantity);
+        }
     }
     
     // ========== 8. UPDATE CART TIMESTAMP ==========
@@ -871,7 +1022,9 @@ function addQuickOrderToCart($conn, $data, $userId) {
             'title' => $quickOrder['title'],
             'price' => $finalPrice,
             'quantity' => $quantity,
-            'total' => $itemTotal
+            'total' => $itemTotal,
+            'add_ons_total' => $addOnsTotalForAll,
+            'grand_total' => $grandTotal
         ],
         'summary' => [
             'subtotal' => round($subtotal, 2),
@@ -882,37 +1035,9 @@ function addQuickOrderToCart($conn, $data, $userId) {
 }
 
 /*********************************
- * ADD CART ITEM ADD-ONS
- *********************************/
-function addCartItemAddOns($conn, $cartItemId, $addOns, $quantity) {
-    foreach ($addOns as $addOn) {
-        $addOnName = $addOn['name'] ?? '';
-        $addOnPrice = floatval($addOn['price'] ?? 0);
-        $addOnQty = intval($addOn['quantity'] ?? 1);
-        
-        $stmt = $conn->prepare(
-            "INSERT INTO cart_addons (
-                cart_item_id, name, price, quantity, created_at
-            ) VALUES (
-                :cart_item_id, :name, :price, :quantity, NOW()
-            )"
-        );
-        
-        $stmt->execute([
-            ':cart_item_id' => $cartItemId,
-            ':name' => $addOnName,
-            ':price' => $addOnPrice,
-            ':quantity' => $addOnQty * $quantity
-        ]);
-    }
-}
-
-/*********************************
  * UPDATE CART ITEM QUANTITY
  *********************************/
 function updateCartItemQuantity($conn, $data, $userId) {
-    global $baseUrl;
-    
     $cartItemId = $data['cart_item_id'] ?? null;
     $quantity = intval($data['quantity'] ?? 0);
     
@@ -956,12 +1081,14 @@ function updateCartItemQuantity($conn, $data, $userId) {
     } else {
         // Update quantity
         $newTotal = floatval($item['price']) * $quantity;
-        $newGrandTotal = $newTotal + floatval($item['add_ons_total']);
+        $newAddOnsTotal = (floatval($item['add_ons_total']) / max(1, $item['quantity'])) * $quantity;
+        $newGrandTotal = $newTotal + $newAddOnsTotal;
         
         $updateStmt = $conn->prepare(
             "UPDATE cart_items 
              SET quantity = :quantity,
                  total = :total,
+                 add_ons_total = :add_ons_total,
                  grand_total = :grand_total,
                  updated_at = NOW()
              WHERE id = :id"
@@ -969,8 +1096,21 @@ function updateCartItemQuantity($conn, $data, $userId) {
         $updateStmt->execute([
             ':quantity' => $quantity,
             ':total' => $newTotal,
+            ':add_ons_total' => $newAddOnsTotal,
             ':grand_total' => $newGrandTotal,
             ':id' => $cartItemId
+        ]);
+        
+        // Update add-ons quantities
+        $updateAddOns = $conn->prepare(
+            "UPDATE cart_addons 
+             SET quantity = :quantity, 
+                 total = price * :quantity
+             WHERE cart_item_id = :item_id"
+        );
+        $updateAddOns->execute([
+            ':quantity' => $quantity,
+            ':item_id' => $cartItemId
         ]);
         
         $message = 'Quantity updated';
@@ -1001,8 +1141,6 @@ function updateCartItemQuantity($conn, $data, $userId) {
  * REMOVE CART ITEM
  *********************************/
 function removeCartItem($conn, $data, $userId) {
-    global $baseUrl;
-    
     $cartItemId = $data['cart_item_id'] ?? null;
     
     if (!$cartItemId) {
@@ -1177,6 +1315,8 @@ function formatCartItemData($item, $baseUrl) {
         'merchant_id' => intval($item['merchant_id']),
         'merchant_name' => $item['merchant_name'] ?? 'Restaurant',
         'variant_name' => $item['variant_name'] ?? null,
+        'variant_data' => !empty($item['variant_data']) ? json_decode($item['variant_data'], true) : null,
+        'has_variants' => boolval($item['has_variants']),
         'special_instructions' => $item['special_instructions'] ?? null,
         'source_type' => $item['source_type'] ?? 'menu_item',
         'add_ons' => array_map(function($addOn) {
@@ -1185,7 +1325,7 @@ function formatCartItemData($item, $baseUrl) {
                 'name' => $addOn['name'],
                 'price' => floatval($addOn['price']),
                 'quantity' => intval($addOn['quantity']),
-                'total' => floatval($addOn['price']) * intval($addOn['quantity'])
+                'total' => floatval($addOn['total'])
             ];
         }, $item['add_ons'] ?? [])
     ];
