@@ -5,7 +5,7 @@
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Credentials: true");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-User-Id");
 header("Content-Type: application/json; charset=UTF-8");
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -85,6 +85,39 @@ function sendEmailVerificationCode($email, $code) {
     
     error_log("❌ Failed");
     return false;
+}
+
+function sendPasswordResetEmail($email, $resetLink) {
+    global $mailersendApiKey, $mailersendFromEmail, $mailersendFromName;
+    
+    if (empty($mailersendApiKey)) {
+        return false;
+    }
+    
+    $data = [
+        'from' => ['email' => $mailersendFromEmail, 'name' => $mailersendFromName],
+        'to' => [['email' => $email]],
+        'subject' => 'Reset Your Password - DropX',
+        'text' => "Click this link to reset your password: $resetLink\n\nExpires in 1 hour.",
+        'html' => "<h2>Reset Your Password</h2><p>Click <a href='$resetLink'>here</a> to reset your password.</p><p>Link expires in 1 hour.</p>"
+    ];
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, 'https://api.mailersend.com/v1/email');
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $mailersendApiKey
+    ]);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    return ($httpCode === 202 || $httpCode === 200);
 }
 
 /*********************************
@@ -195,9 +228,6 @@ function handlePostRequest() {
         case 'update_profile':
             updateProfile($conn, $input);
             break;
-        case 'update_address':
-            updateAddress($conn, $input);
-            break;
         case 'change_password':
             changePassword($conn, $input);
             break;
@@ -206,6 +236,9 @@ function handlePostRequest() {
             break;
         case 'get_addresses':
             getAddresses($conn, $input);
+            break;
+        case 'create_address':
+            createAddress($conn, $input);
             break;
         case 'delete_address':
             deleteAddress($conn, $input);
@@ -597,7 +630,7 @@ function verifyPhone($conn, $data) {
 }
 
 /*********************************
- * PROFILE & ADDRESS FUNCTIONS
+ * PROFILE FUNCTIONS
  *********************************/
 function updateProfile($conn, $data) {
     if (empty($_SESSION['user_id'])) {
@@ -647,144 +680,6 @@ function updateProfile($conn, $data) {
     ResponseHandler::success([
         'user' => formatUserData($conn, $user)
     ], 'Profile updated successfully');
-}
-
-function updateAddress($conn, $data) {
-    if (empty($_SESSION['user_id'])) {
-        ResponseHandler::error('Unauthorized', 401);
-    }
-
-    $addressLine1 = trim($data['address_line1'] ?? '');
-    $addressLine2 = trim($data['address_line2'] ?? '');
-    $city = trim($data['city'] ?? '');
-    $state = trim($data['state'] ?? '');
-    $postalCode = trim($data['postal_code'] ?? '');
-    $country = trim($data['country'] ?? 'Malawi');
-    $addressType = $data['address_type'] ?? 'home';
-    $isDefault = $data['is_default'] ?? true;
-
-    if (!$addressLine1 || !$city) {
-        ResponseHandler::error('Address line 1 and city are required', 400);
-    }
-
-    $userId = $_SESSION['user_id'];
-
-    if ($isDefault) {
-        $conn->prepare("UPDATE user_addresses SET is_default = 0 WHERE user_id = :user_id")
-             ->execute([':user_id' => $userId]);
-    }
-
-    $checkStmt = $conn->prepare(
-        "SELECT id FROM user_addresses 
-         WHERE user_id = :user_id AND address_line1 = :address_line1 AND city = :city"
-    );
-    $checkStmt->execute([
-        ':user_id' => $userId,
-        ':address_line1' => $addressLine1,
-        ':city' => $city
-    ]);
-    
-    $existingAddress = $checkStmt->fetch(PDO::FETCH_ASSOC);
-    
-    if ($existingAddress) {
-        $stmt = $conn->prepare(
-            "UPDATE user_addresses SET 
-                address_line2 = :address_line2,
-                state = :state,
-                postal_code = :postal_code,
-                country = :country,
-                address_type = :address_type,
-                is_default = :is_default,
-                updated_at = NOW()
-             WHERE id = :id AND user_id = :user_id"
-        );
-        
-        $stmt->execute([
-            ':address_line2' => $addressLine2,
-            ':state' => $state,
-            ':postal_code' => $postalCode,
-            ':country' => $country,
-            ':address_type' => $addressType,
-            ':is_default' => $isDefault ? 1 : 0,
-            ':id' => $existingAddress['id'],
-            ':user_id' => $userId
-        ]);
-        
-        $addressId = $existingAddress['id'];
-    } else {
-        $stmt = $conn->prepare(
-            "INSERT INTO user_addresses 
-                (user_id, address_line1, address_line2, city, state, postal_code, 
-                 country, address_type, is_default, created_at, updated_at)
-             VALUES 
-                (:user_id, :address_line1, :address_line2, :city, :state, :postal_code,
-                 :country, :address_type, :is_default, NOW(), NOW())"
-        );
-        
-        $stmt->execute([
-            ':user_id' => $userId,
-            ':address_line1' => $addressLine1,
-            ':address_line2' => $addressLine2,
-            ':city' => $city,
-            ':state' => $state,
-            ':postal_code' => $postalCode,
-            ':country' => $country,
-            ':address_type' => $addressType,
-            ':is_default' => $isDefault ? 1 : 0
-        ]);
-        
-        $addressId = $conn->lastInsertId();
-    }
-
-    $stmt = $conn->prepare(
-        "SELECT * FROM user_addresses WHERE id = :id AND user_id = :user_id"
-    );
-    $stmt->execute([':id' => $addressId, ':user_id' => $userId]);
-    $address = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    ResponseHandler::success([
-        'address' => $address
-    ], 'Address saved successfully');
-}
-
-function getAddresses($conn, $data) {
-    if (empty($_SESSION['user_id'])) {
-        ResponseHandler::error('Unauthorized', 401);
-    }
-    
-    $stmt = $conn->prepare(
-        "SELECT * FROM user_addresses 
-         WHERE user_id = :user_id 
-         ORDER BY is_default DESC, created_at DESC"
-    );
-    $stmt->execute([':user_id' => $_SESSION['user_id']]);
-    $addresses = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-    ResponseHandler::success([
-        'addresses' => $addresses
-    ]);
-}
-
-function deleteAddress($conn, $data) {
-    if (empty($_SESSION['user_id'])) {
-        ResponseHandler::error('Unauthorized', 401);
-    }
-    
-    $addressId = $data['address_id'] ?? 0;
-    
-    if (!$addressId) {
-        ResponseHandler::error('Address ID is required', 400);
-    }
-    
-    $stmt = $conn->prepare(
-        "DELETE FROM user_addresses WHERE id = :id AND user_id = :user_id"
-    );
-    $stmt->execute([
-        ':id' => $addressId,
-        ':user_id' => $_SESSION['user_id']
-    ]);
-    
-    ResponseHandler::success([], 'Address deleted successfully');
 }
 
 function changePassword($conn, $data) {
@@ -883,27 +778,131 @@ function logoutUser() {
     ResponseHandler::success([], 'Logout successful');
 }
 
+/*********************************
+ * SIMPLIFIED ADDRESS FUNCTIONS (Google Maps Only)
+ *********************************/
+
+function getAddresses($conn, $data) {
+    if (empty($_SESSION['user_id'])) {
+        ResponseHandler::error('Unauthorized', 401);
+    }
+    
+    $stmt = $conn->prepare(
+        "SELECT id, place_id, formatted_address, latitude, longitude, label, created_at, updated_at
+         FROM addresses 
+         WHERE user_id = :user_id 
+         ORDER BY created_at DESC"
+    );
+    $stmt->execute([':user_id' => $_SESSION['user_id']]);
+    $addresses = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Add map link to each address
+    foreach ($addresses as &$address) {
+        $address['map_link'] = "https://www.google.com/maps?q={$address['latitude']},{$address['longitude']}";
+    }
+    
+    ResponseHandler::success([
+        'addresses' => $addresses
+    ]);
+}
+
+function createAddress($conn, $data) {
+    if (empty($_SESSION['user_id'])) {
+        ResponseHandler::error('Unauthorized', 401);
+    }
+    
+    // Validate required fields
+    if (empty($data['latitude']) || empty($data['longitude'])) {
+        ResponseHandler::error('Latitude and longitude are required', 400);
+    }
+    
+    $stmt = $conn->prepare(
+        "INSERT INTO addresses (user_id, place_id, formatted_address, latitude, longitude, label, created_at, updated_at)
+         VALUES (:user_id, :place_id, :formatted_address, :latitude, :longitude, :label, NOW(), NOW())"
+    );
+    
+    $stmt->execute([
+        ':user_id' => $_SESSION['user_id'],
+        ':place_id' => $data['place_id'] ?? null,
+        ':formatted_address' => $data['formatted_address'] ?? null,
+        ':latitude' => $data['latitude'],
+        ':longitude' => $data['longitude'],
+        ':label' => $data['label'] ?? 'Home'
+    ]);
+    
+    $addressId = $conn->lastInsertId();
+    
+    // Return the created address
+    $stmt = $conn->prepare(
+        "SELECT id, place_id, formatted_address, latitude, longitude, label, created_at, updated_at
+         FROM addresses WHERE id = :id AND user_id = :user_id"
+    );
+    $stmt->execute([
+        ':id' => $addressId,
+        ':user_id' => $_SESSION['user_id']
+    ]);
+    $address = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if ($address) {
+        $address['map_link'] = "https://www.google.com/maps?q={$address['latitude']},{$address['longitude']}";
+    }
+    
+    ResponseHandler::success([
+        'address' => $address
+    ], 'Address saved successfully', 201);
+}
+
+function deleteAddress($conn, $data) {
+    if (empty($_SESSION['user_id'])) {
+        ResponseHandler::error('Unauthorized', 401);
+    }
+    
+    $addressId = $data['address_id'] ?? 0;
+    
+    if (!$addressId) {
+        ResponseHandler::error('Address ID is required', 400);
+    }
+    
+    // First check if address exists and belongs to user
+    $stmt = $conn->prepare(
+        "SELECT id FROM addresses WHERE id = :id AND user_id = :user_id"
+    );
+    $stmt->execute([
+        ':id' => $addressId,
+        ':user_id' => $_SESSION['user_id']
+    ]);
+    
+    if ($stmt->rowCount() === 0) {
+        ResponseHandler::error('Address not found', 404);
+    }
+    
+    $stmt = $conn->prepare(
+        "DELETE FROM addresses WHERE id = :id AND user_id = :user_id"
+    );
+    $stmt->execute([
+        ':id' => $addressId,
+        ':user_id' => $_SESSION['user_id']
+    ]);
+    
+    ResponseHandler::success([], 'Address deleted successfully');
+}
+
+/*********************************
+ * FORMAT USER DATA
+ *********************************/
 function formatUserData($conn, $user) {
-    $address = null;
-    $city = null;
+    $defaultAddress = null;
     
     if (!empty($user['id'])) {
         $stmt = $conn->prepare(
-            "SELECT address_line1, address_line2, city, state, postal_code, country 
-             FROM user_addresses 
-             WHERE user_id = :user_id AND is_default = 1 
+            "SELECT formatted_address, latitude, longitude, label 
+             FROM addresses 
+             WHERE user_id = :user_id 
+             ORDER BY created_at DESC 
              LIMIT 1"
         );
         $stmt->execute([':user_id' => $user['id']]);
         $defaultAddress = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($defaultAddress) {
-            $address = $defaultAddress['address_line1'];
-            if (!empty($defaultAddress['address_line2'])) {
-                $address .= ', ' . $defaultAddress['address_line2'];
-            }
-            $city = $defaultAddress['city'] ?? '';
-        }
     }
     
     return [
@@ -912,8 +911,9 @@ function formatUserData($conn, $user) {
         'full_name' => $user['full_name'] ?: 'User',
         'email' => $user['email'] ?? '',
         'phone' => $user['phone'] ?? '',
-        'address' => $address ?? '',
-        'city' => $city ?? '',
+        'address' => $defaultAddress['formatted_address'] ?? '',
+        'latitude' => $defaultAddress['latitude'] ?? null,
+        'longitude' => $defaultAddress['longitude'] ?? null,
         'gender' => $user['gender'] ?? '',
         'avatar' => $user['avatar'] ?? null,
         'login_method' => $user['login_method'] ?? 'email',
