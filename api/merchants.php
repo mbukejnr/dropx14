@@ -87,6 +87,20 @@ try {
         exit();
     }
     
+    // NEW: GET SINGLE MENU ITEM DETAILS
+    if ($method === 'GET' && preg_match('#/merchants\.php/(\d+)/menu/(\d+)$#', $path, $matches)) {
+        $merchantId = intval($matches[1]);
+        $menuItemId = intval($matches[2]);
+        $includeVariants = isset($queryParams['include_variants'])
+            ? filter_var($queryParams['include_variants'], FILTER_VALIDATE_BOOLEAN)
+            : true;
+        $includeAddOns = isset($queryParams['include_add_ons'])
+            ? filter_var($queryParams['include_add_ons'], FILTER_VALIDATE_BOOLEAN)
+            : true;
+        getMenuItemDetails($conn, $merchantId, $menuItemId, $baseUrl, $includeVariants, $includeAddOns);
+        exit();
+    }
+    
     // Merchant menu items with add-ons endpoint
     if ($method === 'GET' && preg_match('#/merchants\.php/(\d+)/menu/(\d+)/add-ons$#', $path, $matches)) {
         $merchantId = intval($matches[1]);
@@ -589,6 +603,149 @@ function getMerchantMenu($conn, $merchantId, $baseUrl, $includeVariants = true, 
         'global_add_ons' => $globalAddOns,
         'total_items' => $totalItems,
         'total_categories' => count($menuList)
+    ]);
+}
+
+/*********************************
+ * NEW: GET SINGLE MENU ITEM DETAILS
+ *********************************/
+function getMenuItemDetails($conn, $merchantId, $menuItemId, $baseUrl, $includeVariants = true, $includeAddOns = true) {
+    // Check if merchant exists
+    $checkStmt = $conn->prepare(
+        "SELECT id, name FROM merchants WHERE id = :id AND is_active = 1"
+    );
+    $checkStmt->execute([':id' => $merchantId]);
+    $merchant = $checkStmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$merchant) {
+        ResponseHandler::error('Merchant not found', 404);
+    }
+    
+    // Get menu item details
+    $selectFields = "SELECT 
+            mi.id,
+            mi.name,
+            mi.description,
+            mi.price,
+            mi.image_url,
+            mi.category,
+            mi.item_type,
+            mi.is_available,
+            mi.is_popular,
+            mi.preparation_time,
+            mi.unit_type,
+            mi.unit_value,
+            mi.max_quantity,
+            mi.stock_quantity,
+            mi.sort_order";
+    
+    if ($includeVariants) {
+        $selectFields .= ", mi.has_variants, mi.variant_type, mi.variants_json";
+    }
+    
+    if ($includeAddOns) {
+        $selectFields .= ", mi.add_ons_json";
+    }
+    
+    $stmt = $conn->prepare(
+        "$selectFields
+        FROM menu_items mi
+        WHERE mi.id = :menu_item_id 
+        AND mi.merchant_id = :merchant_id
+        AND mi.is_available = 1"
+    );
+    
+    $stmt->execute([
+        ':menu_item_id' => $menuItemId,
+        ':merchant_id' => $merchantId
+    ]);
+    
+    $menuItem = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$menuItem) {
+        ResponseHandler::error('Menu item not found', 404);
+    }
+    
+    // Format the menu item
+    $formattedItem = formatMenuItemData($menuItem, $baseUrl);
+    
+    // Get item-specific add-ons
+    $itemAddOns = [];
+    if ($includeAddOns) {
+        $addOnStmt = $conn->prepare(
+            "SELECT 
+                mao.id,
+                mao.name,
+                mao.description,
+                mao.price,
+                mao.category,
+                mao.is_per_item,
+                mao.max_quantity,
+                mao.is_required,
+                mao.is_available,
+                mao.compatible_with,
+                mao.sort_order,
+                maoc.name as category_name,
+                maoc.max_selectable as category_max_selectable,
+                maoc.is_required as category_required
+            FROM merchant_add_ons mao
+            LEFT JOIN merchant_add_on_categories maoc ON mao.category_id = maoc.id
+            WHERE mao.menu_item_id = :menu_item_id
+            AND mao.merchant_id = :merchant_id
+            AND mao.is_available = 1
+            ORDER BY maoc.sort_order, mao.sort_order, mao.price ASC"
+        );
+        
+        $addOnStmt->execute([
+            ':menu_item_id' => $menuItemId,
+            ':merchant_id' => $merchantId
+        ]);
+        
+        $itemAddOns = $addOnStmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+    
+    // Get global add-ons
+    $globalAddOns = [];
+    if ($includeAddOns) {
+        $globalAddOns = getGlobalMerchantAddOns($conn, $merchantId, $baseUrl);
+    }
+    
+    // Format add-ons
+    $formattedItemAddOns = array_map(function($addOn) use ($baseUrl) {
+        return formatAddOnData($addOn, $baseUrl);
+    }, $itemAddOns);
+    
+    // Merge item-specific and global add-ons
+    $allAddOns = array_merge($formattedItemAddOns, $globalAddOns);
+    
+    // Group add-ons by category
+    $groupedAddOns = [];
+    foreach ($allAddOns as $addOn) {
+        $catKey = $addOn['category'] ?? 'uncategorized';
+        $catName = $addOn['category_name'] ?? $addOn['category'] ?? 'Other Options';
+        
+        if (!isset($groupedAddOns[$catKey])) {
+            $groupedAddOns[$catKey] = [
+                'category_id' => $addOn['category'],
+                'category_name' => $catName,
+                'max_selectable' => $addOn['category_max_selectable'] ?? 10,
+                'is_required' => $addOn['category_required'] ?? $addOn['is_required'] ?? false,
+                'add_ons' => []
+            ];
+        }
+        
+        $groupedAddOns[$catKey]['add_ons'][] = $addOn;
+    }
+    
+    ResponseHandler::success([
+        'merchant_id' => $merchantId,
+        'merchant_name' => $merchant['name'],
+        'menu_item' => $formattedItem,
+        'variants' => $formattedItem['variants'] ?? [],
+        'add_ons' => array_values($groupedAddOns),
+        'global_add_ons' => $globalAddOns,
+        'has_variants' => $formattedItem['has_variants'] ?? false,
+        'has_add_ons' => count($allAddOns) > 0
     ]);
 }
 
