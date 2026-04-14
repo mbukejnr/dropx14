@@ -1,8 +1,8 @@
 <?php
 /*********************************
  * CHECKOUT API
+ * Dynamically calculates delivery fee based on distance
  * Integrates with cart.php for cart management
- * Dynamic delivery fee calculation based on distance
  * Payment-first flow with proper transaction handling
  *********************************/
 
@@ -182,7 +182,7 @@ function getCartItemsWithDetails($conn, $cartId) {
 }
 
 /*********************************
- * DELIVERY FEE CALCULATION
+ * DELIVERY FEE CALCULATION (DYNAMIC)
  *********************************/
 function getNearestMerchantBranch($conn, $merchantId, $customerLat, $customerLng) {
     $tableCheck = $conn->query("SHOW TABLES LIKE 'merchant_branches'");
@@ -225,6 +225,7 @@ function getNearestMerchantBranch($conn, $merchantId, $customerLat, $customerLng
 function calculateDeliveryFeeByDistance($distanceKm, $promoCode = null) {
     $distanceKm = max(0, floatval($distanceKm));
     
+    // Calculate fee based on distance
     if ($distanceKm <= DELIVERY_BASE_DISTANCE) {
         $fee = DELIVERY_BASE_FEE;
     } else {
@@ -232,8 +233,10 @@ function calculateDeliveryFeeByDistance($distanceKm, $promoCode = null) {
         $fee = DELIVERY_BASE_FEE + ($extraKm * DELIVERY_FEE_PER_KM);
     }
     
+    // Apply minimum and maximum caps
     $fee = max(DELIVERY_FEE_MINIMUM, min(DELIVERY_FEE_MAXIMUM, $fee));
     
+    // Apply promo code discount
     $discount = 0;
     if ($promoCode) {
         $promoCode = strtoupper(trim($promoCode));
@@ -263,6 +266,7 @@ function calculateDeliveryFeeByDistance($distanceKm, $promoCode = null) {
 }
 
 function getDynamicDeliveryFee($conn, $merchantId, $customerLat, $customerLng, $promoCode = null) {
+    // Validate coordinates
     if (!is_numeric($customerLat) || !is_numeric($customerLng)) {
         return [
             'success' => true,
@@ -281,6 +285,7 @@ function getDynamicDeliveryFee($conn, $merchantId, $customerLat, $customerLng, $
         $nearestBranch = getNearestMerchantBranch($conn, $merchantId, $customerLat, $customerLng);
         
         if (!$nearestBranch) {
+            // No branch found, use default delivery fee
             return [
                 'success' => true,
                 'fee' => DELIVERY_FEE_MINIMUM,
@@ -351,6 +356,7 @@ function calculateCartTotals($conn, $cartId, $userId, $items, $dynamicDeliveryFe
     $merchantId = $merchantIds[0];
     $merchantName = $items[0]['merchant_name'];
     
+    // Get delivery fee from dynamic calculation
     $deliveryFee = DELIVERY_FEE_MINIMUM;
     $deliveryBreakdown = null;
     $deliveryDistance = null;
@@ -363,8 +369,9 @@ function calculateCartTotals($conn, $cartId, $userId, $items, $dynamicDeliveryFe
         $deliveryBranch = $dynamicDeliveryFeeData['branch'] ?? null;
     }
     
+    // Get merchant minimum order (using min_order_amount from your schema)
     $merchantStmt = $conn->prepare("
-        SELECT minimum_order, average_preparation_time, preparation_time 
+        SELECT min_order_amount as minimum_order, preparation_time_minutes as average_preparation_time 
         FROM merchants 
         WHERE id = :id
     ");
@@ -372,8 +379,9 @@ function calculateCartTotals($conn, $cartId, $userId, $items, $dynamicDeliveryFe
     $merchantData = $merchantStmt->fetch(PDO::FETCH_ASSOC);
     
     $minimumOrder = floatval($merchantData['minimum_order'] ?? 0);
-    $prepTime = intval($merchantData['average_preparation_time'] ?? $merchantData['preparation_time'] ?? 20);
+    $prepTime = intval($merchantData['average_preparation_time'] ?? 20);
     
+    // Calculate subtotal from cart items
     $subtotal = 0;
     $itemCount = 0;
     $totalQuantity = 0;
@@ -616,7 +624,7 @@ function createOrder($conn, $userId, $cartId, $totals, $address, $paymentMethod,
             ':payment_status' => PAYMENT_STATUS_PAID,
             ':status' => ORDER_STATUS_PAID,
             ':special_instructions' => $specialInstructions ?: null,
-            ':preparation_time' => $totals['merchant']['preparation_time'] ?? null,
+            ':preparation_time' => intval($totals['merchant']['preparation_time']),
             ':delivery_distance' => $totals['delivery_distance'] ?? null,
             ':delivery_branch' => isset($totals['delivery_branch']['branch_name']) ? $totals['delivery_branch']['branch_name'] : null,
             ':delivery_branch_id' => isset($totals['delivery_branch']['id']) ? $totals['delivery_branch']['id'] : null
@@ -739,6 +747,7 @@ try {
         $merchantId = $merchantIds[0];
         $address = getUserDefaultAddress($conn, $userId);
         
+        // Calculate delivery fee dynamically
         $promoCode = $_GET['promo_code'] ?? null;
         $deliveryFeeResult = null;
         
@@ -751,6 +760,7 @@ try {
                 $promoCode
             );
         } else {
+            // No address, use default delivery fee
             $deliveryFeeResult = [
                 'success' => true,
                 'fee' => DELIVERY_FEE_MINIMUM,
@@ -932,6 +942,7 @@ try {
         
         $merchantId = $items[0]['merchant_id'];
         
+        // Calculate delivery fee dynamically
         if ($address && !empty($address['latitude']) && !empty($address['longitude'])) {
             $deliveryFeeResult = getDynamicDeliveryFee(
                 $conn,
