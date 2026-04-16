@@ -8,8 +8,10 @@
 
 ob_start();
 
-ini_set('display_errors', 0);
-error_reporting(E_ALL & ~E_WARNING & ~E_NOTICE);
+// TEMPORARY DEBUG - Enable to see errors (remove in production)
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
 
 /*********************************
  * CORS Configuration
@@ -27,25 +29,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-set_error_handler(function($errno, $errstr, $errfile, $errline) {
-    if (strpos($errstr, 'Undefined array key') !== false) {
-        return true;
-    }
-    throw new ErrorException($errstr, 0, $errno, $errfile, $errline);
-});
-
 /*********************************
  * SESSION CONFIG
  *********************************/
 if (session_status() === PHP_SESSION_NONE) {
-    session_set_cookie_params([
-        'lifetime' => 86400 * 30,
-        'path' => '/',
-        'domain' => '',
-        'secure' => true,
-        'httponly' => true,
-        'samesite' => 'None'
-    ]);
+    // Check if running locally
+    $isLocal = ($_SERVER['HTTP_HOST'] === 'localhost' || $_SERVER['SERVER_NAME'] === 'localhost');
+    
+    if ($isLocal) {
+        session_set_cookie_params([
+            'lifetime' => 86400 * 30,
+            'path' => '/',
+            'httponly' => true
+        ]);
+    } else {
+        session_set_cookie_params([
+            'lifetime' => 86400 * 30,
+            'path' => '/',
+            'domain' => '',
+            'secure' => true,
+            'httponly' => true,
+            'samesite' => 'None'
+        ]);
+    }
     session_start();
 }
 
@@ -99,7 +105,9 @@ function checkAuthentication() {
     
     if ($sessionToken) {
         session_id($sessionToken);
-        session_start();
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
+        }
     }
     
     if (!empty($_SESSION['user_id']) && !empty($_SESSION['logged_in'])) {
@@ -161,14 +169,19 @@ function getCartItemsWithDetails($conn, $cartId) {
     $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
     foreach ($items as &$item) {
-        $addonStmt = $conn->prepare("
-            SELECT id, name, price, quantity, total 
-            FROM cart_addons 
-            WHERE cart_item_id = :cart_item_id
-            ORDER BY created_at ASC
-        ");
-        $addonStmt->execute([':cart_item_id' => $item['id']]);
-        $item['add_ons'] = $addonStmt->fetchAll(PDO::FETCH_ASSOC);
+        // Check if cart_addons table exists
+        try {
+            $addonStmt = $conn->prepare("
+                SELECT id, name, price, quantity, total 
+                FROM cart_addons 
+                WHERE cart_item_id = :cart_item_id
+                ORDER BY created_at ASC
+            ");
+            $addonStmt->execute([':cart_item_id' => $item['id']]);
+            $item['add_ons'] = $addonStmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Exception $e) {
+            $item['add_ons'] = [];
+        }
         
         if ($item['variant_data']) {
             $item['variant_data'] = json_decode($item['variant_data'], true);
@@ -185,41 +198,46 @@ function getCartItemsWithDetails($conn, $cartId) {
  * DELIVERY FEE CALCULATION (DYNAMIC)
  *********************************/
 function getNearestMerchantBranch($conn, $merchantId, $customerLat, $customerLng) {
-    $tableCheck = $conn->query("SHOW TABLES LIKE 'merchant_branches'");
-    if ($tableCheck->rowCount() == 0) {
+    try {
+        $tableCheck = $conn->query("SHOW TABLES LIKE 'merchant_branches'");
+        if ($tableCheck->rowCount() == 0) {
+            return null;
+        }
+        
+        $stmt = $conn->prepare("
+            SELECT 
+                id,
+                branch_name,
+                address,
+                latitude,
+                longitude,
+                is_main_branch,
+                delivery_range_km,
+                (6371 * acos(
+                    cos(radians(:customer_lat)) * cos(radians(latitude)) * 
+                    cos(radians(longitude) - radians(:customer_lng)) + 
+                    sin(radians(:customer_lat)) * sin(radians(latitude))
+                )) AS distance_km
+            FROM merchant_branches
+            WHERE merchant_id = :merchant_id 
+            AND is_active = 1
+            HAVING distance_km <= COALESCE(delivery_range_km, :max_distance)
+            ORDER BY distance_km ASC
+            LIMIT 1
+        ");
+        
+        $stmt->execute([
+            ':customer_lat' => floatval($customerLat),
+            ':customer_lng' => floatval($customerLng),
+            ':merchant_id' => $merchantId,
+            ':max_distance' => MAX_DELIVERY_DISTANCE
+        ]);
+        
+        return $stmt->fetch(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        error_log("Error in getNearestMerchantBranch: " . $e->getMessage());
         return null;
     }
-    
-    $stmt = $conn->prepare("
-        SELECT 
-            id,
-            branch_name,
-            address,
-            latitude,
-            longitude,
-            is_main_branch,
-            delivery_range_km,
-            (6371 * acos(
-                cos(radians(:customer_lat)) * cos(radians(latitude)) * 
-                cos(radians(longitude) - radians(:customer_lng)) + 
-                sin(radians(:customer_lat)) * sin(radians(latitude))
-            )) AS distance_km
-        FROM merchant_branches
-        WHERE merchant_id = :merchant_id 
-        AND is_active = 1
-        HAVING distance_km <= COALESCE(delivery_range_km, :max_distance)
-        ORDER BY distance_km ASC
-        LIMIT 1
-    ");
-    
-    $stmt->execute([
-        ':customer_lat' => floatval($customerLat),
-        ':customer_lng' => floatval($customerLng),
-        ':merchant_id' => $merchantId,
-        ':max_distance' => MAX_DELIVERY_DISTANCE
-    ]);
-    
-    return $stmt->fetch(PDO::FETCH_ASSOC);
 }
 
 function calculateDeliveryFeeByDistance($distanceKm, $promoCode = null) {
@@ -465,26 +483,31 @@ function calculateCartTotals($conn, $cartId, $userId, $items, $dynamicDeliveryFe
  * ADDRESS FUNCTIONS
  *********************************/
 function getUserDefaultAddress($conn, $userId) {
-    $tableCheck = $conn->query("SHOW TABLES LIKE 'addresses'");
-    if ($tableCheck->rowCount() == 0) {
+    try {
+        $tableCheck = $conn->query("SHOW TABLES LIKE 'addresses'");
+        if ($tableCheck->rowCount() == 0) {
+            return null;
+        }
+        
+        $stmt = $conn->prepare("
+            SELECT id, label, address_line1, address_line2, city, neighborhood, 
+                   latitude, longitude, phone, recipient_name
+            FROM addresses 
+            WHERE user_id = :user_id AND is_default = 1 LIMIT 1
+        ");
+        $stmt->execute([':user_id' => $userId]);
+        $address = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($address) {
+            $address['latitude'] = $address['latitude'] ? floatval($address['latitude']) : null;
+            $address['longitude'] = $address['longitude'] ? floatval($address['longitude']) : null;
+        }
+        
+        return $address;
+    } catch (Exception $e) {
+        error_log("Error getting user address: " . $e->getMessage());
         return null;
     }
-    
-    $stmt = $conn->prepare("
-        SELECT id, label, address_line1, address_line2, city, neighborhood, 
-               latitude, longitude, phone, recipient_name
-        FROM addresses 
-        WHERE user_id = :user_id AND is_default = 1 LIMIT 1
-    ");
-    $stmt->execute([':user_id' => $userId]);
-    $address = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    if ($address) {
-        $address['latitude'] = $address['latitude'] ? floatval($address['latitude']) : null;
-        $address['longitude'] = $address['longitude'] ? floatval($address['longitude']) : null;
-    }
-    
-    return $address;
 }
 
 /*********************************
@@ -660,13 +683,17 @@ function createOrder($conn, $userId, $cartId, $totals, $address, $paymentMethod,
             ]);
         }
         
-        $tableCheck = $conn->query("SHOW TABLES LIKE 'order_tracking'");
-        if ($tableCheck->rowCount() > 0) {
-            $trackStmt = $conn->prepare("
-                INSERT INTO order_tracking (order_id, status, description, created_at)
-                VALUES (:order_id, 'paid', 'Order placed and payment confirmed', NOW())
-            ");
-            $trackStmt->execute([':order_id' => $orderId]);
+        try {
+            $tableCheck = $conn->query("SHOW TABLES LIKE 'order_tracking'");
+            if ($tableCheck->rowCount() > 0) {
+                $trackStmt = $conn->prepare("
+                    INSERT INTO order_tracking (order_id, status, description, created_at)
+                    VALUES (:order_id, 'paid', 'Order placed and payment confirmed', NOW())
+                ");
+                $trackStmt->execute([':order_id' => $orderId]);
+            }
+        } catch (Exception $e) {
+            error_log("Order tracking insert error: " . $e->getMessage());
         }
         
         $clearStmt = $conn->prepare("
@@ -694,6 +721,7 @@ function createOrder($conn, $userId, $cartId, $totals, $address, $paymentMethod,
     } catch (Exception $e) {
         $conn->rollBack();
         error_log("Order creation error: " . $e->getMessage());
+        error_log("Order creation trace: " . $e->getTraceAsString());
         return [
             'success' => false,
             'message' => $e->getMessage()
@@ -711,31 +739,49 @@ try {
         $input = $_POST;
     }
     
+    error_log("Checkout: Method = $method");
+    error_log("Checkout: Input = " . json_encode($input));
+    
     $userId = checkAuthentication();
     
     if (!$userId) {
         ob_clean();
         ResponseHandler::error('Authentication required', 401);
+        exit();
     }
-
+    
+    error_log("Checkout: User ID = $userId");
+    
     $db = new Database();
     $conn = $db->getConnection();
     
     if (!$conn) {
+        error_log("Checkout: Database connection failed");
         ResponseHandler::error('Database connection failed', 500);
+        exit();
     }
+    
+    error_log("Checkout: Database connected successfully");
 
     if ($method === 'GET') {
         // GET CHECKOUT DATA
+        error_log("Checkout: Processing GET request");
+        
         $cart = getActiveCart($conn, $userId);
         if (!$cart) {
             ResponseHandler::error('No active cart found', 404);
+            exit();
         }
+        
+        error_log("Checkout: Cart found - ID: " . $cart['id']);
         
         $items = getCartItemsWithDetails($conn, $cart['id']);
         if (empty($items)) {
             ResponseHandler::error('Cart is empty', 400);
+            exit();
         }
+        
+        error_log("Checkout: Items count: " . count($items));
         
         $merchantIds = array_unique(array_column($items, 'merchant_id'));
         if (count($merchantIds) > 1) {
@@ -743,10 +789,14 @@ try {
                 'Cart contains items from multiple merchants. Please checkout each merchant separately.',
                 400
             );
+            exit();
         }
         
         $merchantId = $merchantIds[0];
         $address = getUserDefaultAddress($conn, $userId);
+        
+        error_log("Checkout: Merchant ID: $merchantId");
+        error_log("Checkout: Address: " . json_encode($address));
         
         // Calculate delivery fee dynamically
         $promoCode = $_GET['promo_code'] ?? null;
@@ -754,6 +804,7 @@ try {
         
         if (!$deliveryFeeResult['success']) {
             ResponseHandler::error($deliveryFeeResult['error'], 400);
+            exit();
         }
         
         if (!$deliveryFeeResult['within_range']) {
@@ -761,16 +812,19 @@ try {
                 'Delivery not available for this location. Maximum distance is ' . MAX_DELIVERY_DISTANCE . 'km.',
                 400
             );
+            exit();
         }
         
         $totals = calculateCartTotals($conn, $cart['id'], $userId, $items, $deliveryFeeResult);
         
         if (isset($totals['error'])) {
             ResponseHandler::error($totals['error'], 400);
+            exit();
         }
         
         if (!$totals['merchant']['minimum_met']) {
             ResponseHandler::error('Minimum order requirement not met. Shortfall: ' . $totals['merchant']['shortfall_formatted'], 400);
+            exit();
         }
         
         $wallet = getWalletBalance($conn, $userId);
@@ -806,7 +860,7 @@ try {
             ];
         }
         
-        ResponseHandler::success([
+        $responseData = [
             'cart_id' => (string)$cart['id'],
             'merchant' => $totals['merchant'],
             'items' => $totals['items'],
@@ -874,10 +928,15 @@ try {
                     ]
                 ]
             ]
-        ]);
+        ];
+        
+        error_log("Checkout: Sending successful response");
+        ResponseHandler::success($responseData, 'Checkout data retrieved successfully');
         
     } elseif ($method === 'POST') {
         // CREATE ORDER
+        error_log("Checkout: Processing POST request");
+        
         $cartId = $input['cart_id'] ?? null;
         $paymentMethod = $input['payment_method'] ?? null;
         $transactionId = $input['transaction_id'] ?? null;
@@ -886,12 +945,15 @@ try {
         
         if (!$cartId) {
             ResponseHandler::error('Cart ID required', 400);
+            exit();
         }
         if (!$paymentMethod) {
             ResponseHandler::error('Payment method required', 400);
+            exit();
         }
         if (!$transactionId || !$reference) {
             ResponseHandler::error('Transaction ID and reference required', 400);
+            exit();
         }
         
         $cartStmt = $conn->prepare("
@@ -902,11 +964,13 @@ try {
         
         if (!$cartStmt->fetch()) {
             ResponseHandler::error('Cart not found or not active', 404);
+            exit();
         }
         
         $items = getCartItemsWithDetails($conn, $cartId);
         if (empty($items)) {
             ResponseHandler::error('Cart is empty', 400);
+            exit();
         }
         
         $address = getUserDefaultAddress($conn, $userId);
@@ -916,22 +980,26 @@ try {
         
         if (!$deliveryFeeResult['success'] || !$deliveryFeeResult['within_range']) {
             ResponseHandler::error($deliveryFeeResult['error'] ?? 'Delivery not available', 400);
+            exit();
         }
         
         $totals = calculateCartTotals($conn, $cartId, $userId, $items, $deliveryFeeResult);
         
         if (isset($totals['error'])) {
             ResponseHandler::error($totals['error'], 400);
+            exit();
         }
         
         if (!$totals['merchant']['minimum_met']) {
             ResponseHandler::error('Minimum order requirement not met', 400);
+            exit();
         }
         
         if ($paymentMethod === PAYMENT_METHOD_DROPX_WALLET) {
             $walletDebit = debitWallet($conn, $userId, $totals['total_amount'], $reference);
             if (!$walletDebit['success']) {
                 ResponseHandler::error($walletDebit['message'], 400);
+                exit();
             }
         }
         
@@ -968,6 +1036,7 @@ try {
             
             if (!$orderId) {
                 ResponseHandler::error('Order ID required', 400);
+                exit();
             }
             
             $stmt = $conn->prepare("
@@ -979,10 +1048,12 @@ try {
             
             if (!$order) {
                 ResponseHandler::error('Order not found', 404);
+                exit();
             }
             
             if (!in_array($order['status'], [ORDER_STATUS_PENDING, ORDER_STATUS_PAID])) {
                 ResponseHandler::error('Order cannot be cancelled at this stage', 400);
+                exit();
             }
             
             $updateStmt = $conn->prepare("
