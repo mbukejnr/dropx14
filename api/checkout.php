@@ -712,7 +712,7 @@ try {
     
     if (!$userId) {
         ob_clean();
-        ResponseHandler::error('Authentication required', 401, 'AUTH_REQUIRED');
+        ResponseHandler::error('Authentication required', 401);
     }
     
     $db = new Database();
