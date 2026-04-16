@@ -8,11 +8,6 @@
 
 ob_start();
 
-// TEMPORARY DEBUG - Enable to see errors (remove in production)
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
-
 /*********************************
  * CORS Configuration
  *********************************/
@@ -33,7 +28,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
  * SESSION CONFIG
  *********************************/
 if (session_status() === PHP_SESSION_NONE) {
-    // Check if running locally
     $isLocal = ($_SERVER['HTTP_HOST'] === 'localhost' || $_SERVER['SERVER_NAME'] === 'localhost');
     
     if ($isLocal) {
@@ -70,13 +64,11 @@ define('DELIVERY_FEE_MINIMUM', 1500.00);
 define('DELIVERY_FEE_MAXIMUM', 20000.00);
 define('MAX_DELIVERY_DISTANCE', 50);
 
-// Payment methods
 define('PAYMENT_METHOD_DROPX_WALLET', 'dropx_wallet');
 define('PAYMENT_METHOD_AIRTEL_MONEY', 'airtel_money');
 define('PAYMENT_METHOD_TNM_MPAMBA', 'tnm_mpamba');
 define('PAYMENT_METHOD_BANK_TRANSFER', 'bank_transfer');
 
-// Order status constants
 define('ORDER_STATUS_PENDING', 'pending');
 define('ORDER_STATUS_PAID', 'paid');
 define('ORDER_STATUS_PROCESSING', 'processing');
@@ -84,13 +76,11 @@ define('ORDER_STATUS_SUCCESS', 'success');
 define('ORDER_STATUS_FAILED', 'failed');
 define('ORDER_STATUS_CANCELLED', 'cancelled');
 
-// Payment status constants
 define('PAYMENT_STATUS_PENDING', 'pending');
 define('PAYMENT_STATUS_PAID', 'paid');
 define('PAYMENT_STATUS_FAILED', 'failed');
 define('PAYMENT_STATUS_REFUNDED', 'refunded');
 
-// DropX payment details
 define('DROPX_BANK_NAME', 'NBS Bank');
 define('DROPX_BANK_ACCOUNT_NAME', 'DROPX LIMITED');
 define('DROPX_BANK_ACCOUNT_NUMBER', '1234567890');
@@ -169,7 +159,6 @@ function getCartItemsWithDetails($conn, $cartId) {
     $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
     foreach ($items as &$item) {
-        // Check if cart_addons table exists
         try {
             $addonStmt = $conn->prepare("
                 SELECT id, name, price, quantity, total 
@@ -195,7 +184,7 @@ function getCartItemsWithDetails($conn, $cartId) {
 }
 
 /*********************************
- * DELIVERY FEE CALCULATION (DYNAMIC)
+ * DELIVERY FEE CALCULATION
  *********************************/
 function getNearestMerchantBranch($conn, $merchantId, $customerLat, $customerLng) {
     try {
@@ -235,7 +224,6 @@ function getNearestMerchantBranch($conn, $merchantId, $customerLat, $customerLng
         
         return $stmt->fetch(PDO::FETCH_ASSOC);
     } catch (Exception $e) {
-        error_log("Error in getNearestMerchantBranch: " . $e->getMessage());
         return null;
     }
 }
@@ -243,7 +231,6 @@ function getNearestMerchantBranch($conn, $merchantId, $customerLat, $customerLng
 function calculateDeliveryFeeByDistance($distanceKm, $promoCode = null) {
     $distanceKm = max(0, floatval($distanceKm));
     
-    // Calculate fee based on distance
     if ($distanceKm <= DELIVERY_BASE_DISTANCE) {
         $fee = DELIVERY_BASE_FEE;
     } else {
@@ -251,10 +238,8 @@ function calculateDeliveryFeeByDistance($distanceKm, $promoCode = null) {
         $fee = DELIVERY_BASE_FEE + ($extraKm * DELIVERY_FEE_PER_KM);
     }
     
-    // Apply minimum and maximum caps
     $fee = max(DELIVERY_FEE_MINIMUM, min(DELIVERY_FEE_MAXIMUM, $fee));
     
-    // Apply promo code discount
     $discount = 0;
     if ($promoCode) {
         $promoCode = strtoupper(trim($promoCode));
@@ -284,7 +269,6 @@ function calculateDeliveryFeeByDistance($distanceKm, $promoCode = null) {
 }
 
 function getDynamicDeliveryFee($conn, $merchantId, $address, $promoCode = null) {
-    // Validate coordinates
     if (!$address || empty($address['latitude']) || empty($address['longitude'])) {
         return [
             'success' => true,
@@ -306,7 +290,6 @@ function getDynamicDeliveryFee($conn, $merchantId, $address, $promoCode = null) 
         $nearestBranch = getNearestMerchantBranch($conn, $merchantId, $customerLat, $customerLng);
         
         if (!$nearestBranch) {
-            // No branch found, use default delivery fee
             return [
                 'success' => true,
                 'fee' => DELIVERY_FEE_MINIMUM,
@@ -325,7 +308,7 @@ function getDynamicDeliveryFee($conn, $merchantId, $address, $promoCode = null) 
         if ($distanceKm > MAX_DELIVERY_DISTANCE) {
             return [
                 'success' => false,
-                'error' => 'Delivery not available for this location (beyond ' . MAX_DELIVERY_DISTANCE . 'km range)',
+                'error' => 'Delivery not available for this location',
                 'within_range' => false,
                 'distance' => $distanceKm,
                 'fee' => DELIVERY_FEE_MAXIMUM
@@ -346,7 +329,6 @@ function getDynamicDeliveryFee($conn, $merchantId, $address, $promoCode = null) 
         ];
         
     } catch (Exception $e) {
-        error_log("Error getting dynamic delivery fee: " . $e->getMessage());
         return [
             'success' => true,
             'fee' => DELIVERY_FEE_MINIMUM,
@@ -377,7 +359,6 @@ function calculateCartTotals($conn, $cartId, $userId, $items, $dynamicDeliveryFe
     $merchantId = $merchantIds[0];
     $merchantName = $items[0]['merchant_name'];
     
-    // Get delivery fee from dynamic calculation
     $deliveryFee = DELIVERY_FEE_MINIMUM;
     $deliveryBreakdown = null;
     $deliveryDistance = null;
@@ -390,7 +371,6 @@ function calculateCartTotals($conn, $cartId, $userId, $items, $dynamicDeliveryFe
         $deliveryBranch = $dynamicDeliveryFeeData['branch'] ?? null;
     }
     
-    // Get merchant minimum order
     $merchantStmt = $conn->prepare("
         SELECT min_order_amount as minimum_order, preparation_time_minutes as average_preparation_time 
         FROM merchants 
@@ -402,7 +382,6 @@ function calculateCartTotals($conn, $cartId, $userId, $items, $dynamicDeliveryFe
     $minimumOrder = floatval($merchantData['minimum_order'] ?? 0);
     $prepTime = intval($merchantData['average_preparation_time'] ?? 20);
     
-    // Calculate subtotal from cart items
     $subtotal = 0;
     $itemCount = 0;
     $totalQuantity = 0;
@@ -505,7 +484,6 @@ function getUserDefaultAddress($conn, $userId) {
         
         return $address;
     } catch (Exception $e) {
-        error_log("Error getting user address: " . $e->getMessage());
         return null;
     }
 }
@@ -545,7 +523,6 @@ function getWalletBalance($conn, $userId) {
             'balance_formatted' => CURRENCY_SYMBOL . '0.00'
         ];
     } catch (Exception $e) {
-        error_log("Wallet balance error: " . $e->getMessage());
         return [
             'exists' => false,
             'balance' => 0,
@@ -590,7 +567,6 @@ function debitWallet($conn, $userId, $amount, $reference, $connInTransaction = f
         return ['success' => true];
         
     } catch (Exception $e) {
-        error_log("Wallet debit error: " . $e->getMessage());
         return ['success' => false, 'message' => $e->getMessage()];
     }
 }
@@ -693,7 +669,7 @@ function createOrder($conn, $userId, $cartId, $totals, $address, $paymentMethod,
                 $trackStmt->execute([':order_id' => $orderId]);
             }
         } catch (Exception $e) {
-            error_log("Order tracking insert error: " . $e->getMessage());
+            // Silent fail
         }
         
         $clearStmt = $conn->prepare("
@@ -710,8 +686,6 @@ function createOrder($conn, $userId, $cartId, $totals, $address, $paymentMethod,
         
         $conn->commit();
         
-        error_log("Order created: ID $orderId, Number $orderNumber");
-        
         return [
             'success' => true,
             'order_id' => $orderId,
@@ -720,8 +694,6 @@ function createOrder($conn, $userId, $cartId, $totals, $address, $paymentMethod,
         
     } catch (Exception $e) {
         $conn->rollBack();
-        error_log("Order creation error: " . $e->getMessage());
-        error_log("Order creation trace: " . $e->getTraceAsString());
         return [
             'success' => false,
             'message' => $e->getMessage()
@@ -739,9 +711,6 @@ try {
         $input = $_POST;
     }
     
-    error_log("Checkout: Method = $method");
-    error_log("Checkout: Input = " . json_encode($input));
-    
     $userId = checkAuthentication();
     
     if (!$userId) {
@@ -750,38 +719,26 @@ try {
         exit();
     }
     
-    error_log("Checkout: User ID = $userId");
-    
     $db = new Database();
     $conn = $db->getConnection();
     
     if (!$conn) {
-        error_log("Checkout: Database connection failed");
         ResponseHandler::error('Database connection failed', 500);
         exit();
     }
-    
-    error_log("Checkout: Database connected successfully");
 
     if ($method === 'GET') {
-        // GET CHECKOUT DATA
-        error_log("Checkout: Processing GET request");
-        
         $cart = getActiveCart($conn, $userId);
         if (!$cart) {
             ResponseHandler::error('No active cart found', 404);
             exit();
         }
         
-        error_log("Checkout: Cart found - ID: " . $cart['id']);
-        
         $items = getCartItemsWithDetails($conn, $cart['id']);
         if (empty($items)) {
             ResponseHandler::error('Cart is empty', 400);
             exit();
         }
-        
-        error_log("Checkout: Items count: " . count($items));
         
         $merchantIds = array_unique(array_column($items, 'merchant_id'));
         if (count($merchantIds) > 1) {
@@ -795,10 +752,6 @@ try {
         $merchantId = $merchantIds[0];
         $address = getUserDefaultAddress($conn, $userId);
         
-        error_log("Checkout: Merchant ID: $merchantId");
-        error_log("Checkout: Address: " . json_encode($address));
-        
-        // Calculate delivery fee dynamically
         $promoCode = $_GET['promo_code'] ?? null;
         $deliveryFeeResult = getDynamicDeliveryFee($conn, $merchantId, $address, $promoCode);
         
@@ -930,13 +883,9 @@ try {
             ]
         ];
         
-        error_log("Checkout: Sending successful response");
         ResponseHandler::success($responseData, 'Checkout data retrieved successfully');
         
     } elseif ($method === 'POST') {
-        // CREATE ORDER
-        error_log("Checkout: Processing POST request");
-        
         $cartId = $input['cart_id'] ?? null;
         $paymentMethod = $input['payment_method'] ?? null;
         $transactionId = $input['transaction_id'] ?? null;
@@ -1028,7 +977,6 @@ try {
         }
         
     } elseif ($method === 'PUT') {
-        // CANCEL ORDER
         $action = $input['action'] ?? '';
         
         if ($action === 'cancel_order') {
@@ -1074,8 +1022,6 @@ try {
 
 } catch (Exception $e) {
     ob_clean();
-    error_log("Checkout error: " . $e->getMessage());
-    error_log("Error trace: " . $e->getTraceAsString());
-    ResponseHandler::error('Server error: ' . $e->getMessage(), 500);
+    ResponseHandler::error('Server error occurred', 500);
 }
 ?>
