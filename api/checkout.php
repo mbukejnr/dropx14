@@ -94,7 +94,7 @@ define('DROPX_TNM_MPAMBA_NUMBER', '0888000000');
 /*********************************
  * AUTHENTICATION
  *********************************/
-function authenticateUser() {
+function checkAuthentication() {
     $sessionToken = $_SERVER['HTTP_X_SESSION_TOKEN'] ?? null;
     
     if ($sessionToken) {
@@ -265,9 +265,9 @@ function calculateDeliveryFeeByDistance($distanceKm, $promoCode = null) {
     ];
 }
 
-function getDynamicDeliveryFee($conn, $merchantId, $customerLat, $customerLng, $promoCode = null) {
+function getDynamicDeliveryFee($conn, $merchantId, $address, $promoCode = null) {
     // Validate coordinates
-    if (!is_numeric($customerLat) || !is_numeric($customerLng)) {
+    if (!$address || empty($address['latitude']) || empty($address['longitude'])) {
         return [
             'success' => true,
             'fee' => DELIVERY_FEE_MINIMUM,
@@ -280,6 +280,9 @@ function getDynamicDeliveryFee($conn, $merchantId, $customerLat, $customerLng, $
             'using_default' => true
         ];
     }
+    
+    $customerLat = $address['latitude'];
+    $customerLng = $address['longitude'];
     
     try {
         $nearestBranch = getNearestMerchantBranch($conn, $merchantId, $customerLat, $customerLng);
@@ -369,7 +372,7 @@ function calculateCartTotals($conn, $cartId, $userId, $items, $dynamicDeliveryFe
         $deliveryBranch = $dynamicDeliveryFeeData['branch'] ?? null;
     }
     
-    // Get merchant minimum order (using min_order_amount from your schema)
+    // Get merchant minimum order
     $merchantStmt = $conn->prepare("
         SELECT min_order_amount as minimum_order, preparation_time_minutes as average_preparation_time 
         FROM merchants 
@@ -708,24 +711,22 @@ try {
         $input = $_POST;
     }
     
-    $userId = authenticateUser();
+    $userId = checkAuthentication();
     
     if (!$userId) {
         ob_clean();
         ResponseHandler::error('Authentication required', 401);
     }
-    
+
     $db = new Database();
     $conn = $db->getConnection();
     
     if (!$conn) {
         ResponseHandler::error('Database connection failed', 500);
     }
-    
-    /*********************************
-     * GET CHECKOUT DATA
-     *********************************/
+
     if ($method === 'GET') {
+        // GET CHECKOUT DATA
         $cart = getActiveCart($conn, $userId);
         if (!$cart) {
             ResponseHandler::error('No active cart found', 404);
@@ -749,30 +750,7 @@ try {
         
         // Calculate delivery fee dynamically
         $promoCode = $_GET['promo_code'] ?? null;
-        $deliveryFeeResult = null;
-        
-        if ($address && !empty($address['latitude']) && !empty($address['longitude'])) {
-            $deliveryFeeResult = getDynamicDeliveryFee(
-                $conn,
-                $merchantId,
-                $address['latitude'],
-                $address['longitude'],
-                $promoCode
-            );
-        } else {
-            // No address, use default delivery fee
-            $deliveryFeeResult = [
-                'success' => true,
-                'fee' => DELIVERY_FEE_MINIMUM,
-                'base_fee' => DELIVERY_BASE_FEE,
-                'discount' => 0,
-                'distance' => 0,
-                'branch' => null,
-                'breakdown' => [],
-                'within_range' => true,
-                'using_default' => true
-            ];
-        }
+        $deliveryFeeResult = getDynamicDeliveryFee($conn, $merchantId, $address, $promoCode);
         
         if (!$deliveryFeeResult['success']) {
             ResponseHandler::error($deliveryFeeResult['error'], 400);
@@ -792,11 +770,7 @@ try {
         }
         
         if (!$totals['merchant']['minimum_met']) {
-            ResponseHandler::error([
-                'message' => 'Minimum order requirement not met',
-                'shortfall' => $totals['merchant']['shortfall'],
-                'shortfall_formatted' => $totals['merchant']['shortfall_formatted']
-            ], 400);
+            ResponseHandler::error('Minimum order requirement not met. Shortfall: ' . $totals['merchant']['shortfall_formatted'], 400);
         }
         
         $wallet = getWalletBalance($conn, $userId);
@@ -901,12 +875,9 @@ try {
                 ]
             ]
         ]);
-    }
-    
-    /*********************************
-     * CREATE ORDER (POST)
-     *********************************/
-    elseif ($method === 'POST') {
+        
+    } elseif ($method === 'POST') {
+        // CREATE ORDER
         $cartId = $input['cart_id'] ?? null;
         $paymentMethod = $input['payment_method'] ?? null;
         $transactionId = $input['transaction_id'] ?? null;
@@ -939,31 +910,9 @@ try {
         }
         
         $address = getUserDefaultAddress($conn, $userId);
-        
         $merchantId = $items[0]['merchant_id'];
         
-        // Calculate delivery fee dynamically
-        if ($address && !empty($address['latitude']) && !empty($address['longitude'])) {
-            $deliveryFeeResult = getDynamicDeliveryFee(
-                $conn,
-                $merchantId,
-                $address['latitude'],
-                $address['longitude'],
-                $promoCode
-            );
-        } else {
-            $deliveryFeeResult = [
-                'success' => true,
-                'fee' => DELIVERY_FEE_MINIMUM,
-                'base_fee' => DELIVERY_BASE_FEE,
-                'discount' => 0,
-                'distance' => 0,
-                'branch' => null,
-                'breakdown' => [],
-                'within_range' => true,
-                'using_default' => true
-            ];
-        }
+        $deliveryFeeResult = getDynamicDeliveryFee($conn, $merchantId, $address, $promoCode);
         
         if (!$deliveryFeeResult['success'] || !$deliveryFeeResult['within_range']) {
             ResponseHandler::error($deliveryFeeResult['error'] ?? 'Delivery not available', 400);
@@ -1009,12 +958,9 @@ try {
         } else {
             ResponseHandler::error('Failed to create order: ' . $order['message'], 500);
         }
-    }
-    
-    /*********************************
-     * CANCEL ORDER (PUT)
-     *********************************/
-    elseif ($method === 'PUT') {
+        
+    } elseif ($method === 'PUT') {
+        // CANCEL ORDER
         $action = $input['action'] ?? '';
         
         if ($action === 'cancel_order') {
@@ -1050,12 +996,11 @@ try {
         } else {
             ResponseHandler::error('Invalid action', 400);
         }
-    }
-    
-    else {
+        
+    } else {
         ResponseHandler::error('Method not allowed', 405);
     }
-    
+
 } catch (Exception $e) {
     ob_clean();
     error_log("Checkout error: " . $e->getMessage());
