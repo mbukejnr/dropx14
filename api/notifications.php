@@ -870,25 +870,28 @@ function logPushAttempt($conn, $userId, $notificationId, $type, $title, $message
     }
 }
 
-/*********************************
- * TEST PUSH NOTIFICATION
- *********************************/
 function testPushNotification($conn, $userId, $input) {
     $title = $input['title'] ?? 'Test Notification ✅';
     $message = $input['message'] ?? 'Your FCM v1 is working correctly!';
-    
+
+    // 🔥 HARD DEBUG
+    $debugStmt = $conn->prepare("SELECT fcm_token FROM user_devices WHERE user_id = :user_id");
+    $debugStmt->execute([':user_id' => $userId]);
+    $allTokens = $debugStmt->fetchAll(PDO::FETCH_COLUMN);
+
     $result = sendFCMv1ToUser(
         $conn,
         $userId,
         $title,
         $message,
         'test',
-        ['test' => true, 'timestamp' => date('Y-m-d H:i:s')]
+        ['test' => true]
     );
-    
+
     ResponseHandler::success([
-        'test_result' => $result,
-        'message' => $result['success'] ? 'Push sent successfully!' : 'Push failed: ' . ($result['error'] ?? 'Unknown error')
+        'debug_user_id' => $userId,
+        'tokens_in_db' => $allTokens,
+        'test_result' => $result
     ]);
 }
 
