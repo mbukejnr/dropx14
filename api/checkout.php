@@ -93,7 +93,7 @@ try {
                     'total_quantity' => 0
                 ]
             ],
-            'delivery_locations' => getDeliveryLocations(),
+            'delivery_locations' => [],
             'default_delivery_fee' => 0,
             'minimum_order_amount' => 0
         ]);
@@ -145,14 +145,14 @@ function handleGetCheckout($userId) {
         // Get saved delivery instructions
         $savedInstructions = getUserDeliveryInstructions($conn, $userId);
         
-        // Get user phone number
+        // Get user phone number - FIXED: users table uses 'phone'
         $userPhone = getUserPhoneNumber($conn, $userId);
         
-        // Calculate delivery fee (based on location)
+        // Calculate delivery fee - FIXED: uses base_delivery_fee
         $deliveryFee = calculateDeliveryFee($conn, $savedLocation);
         
-        // Get available delivery locations
-        $deliveryLocations = getDeliveryLocations();
+        // Get available delivery locations from database
+        $deliveryLocations = getDeliveryLocations($conn);
         
         ResponseHandler::success([
             'authenticated' => true,
@@ -180,7 +180,8 @@ function handleGetCheckout($userId) {
                 'subtotal' => round($subtotal, 2),
                 'delivery_fee' => $deliveryFee,
                 'total' => round($subtotal + $deliveryFee, 2)
-            ]
+            ],
+            'minimum_order_amount' => getMinimumOrderAmount($conn)
         ]);
         
     } catch (Exception $e) {
@@ -232,7 +233,7 @@ function handlePostCheckout($data, $userId) {
         
         // Check minimum order amount if applicable
         $minimumOrder = getMinimumOrderAmount($conn);
-        if ($subtotal < $minimumOrder) {
+        if ($minimumOrder > 0 && $subtotal < $minimumOrder) {
             ResponseHandler::error("Minimum order amount is MWK " . number_format($minimumOrder, 2), 400);
         }
         
@@ -255,6 +256,9 @@ function handlePostCheckout($data, $userId) {
         
         // Save delivery info for future use
         saveUserDeliveryInfo($conn, $userId, $deliveryLocation, $instructions, $phoneNumber);
+        
+        // Update user's phone number in users table
+        updateUserPhone($conn, $userId, $phoneNumber);
         
         // Commit transaction
         $conn->commit();
@@ -391,7 +395,6 @@ function getUserDeliveryLocation($conn, $userId) {
     $stmt = $conn->prepare(
         "SELECT delivery_location FROM user_delivery_info 
          WHERE user_id = :user_id 
-         ORDER BY updated_at DESC 
          LIMIT 1"
     );
     $stmt->execute([':user_id' => $userId]);
@@ -407,7 +410,6 @@ function getUserDeliveryInstructions($conn, $userId) {
     $stmt = $conn->prepare(
         "SELECT instructions FROM user_delivery_info 
          WHERE user_id = :user_id 
-         ORDER BY updated_at DESC 
          LIMIT 1"
     );
     $stmt->execute([':user_id' => $userId]);
@@ -417,54 +419,78 @@ function getUserDeliveryInstructions($conn, $userId) {
 }
 
 /**
- * Get user's phone number
+ * Get user's phone number - FIXED: users table uses 'phone' column
  */
 function getUserPhoneNumber($conn, $userId) {
     $stmt = $conn->prepare(
-        "SELECT phone_number FROM users WHERE id = :user_id"
+        "SELECT phone FROM users WHERE id = :user_id"
     );
     $stmt->execute([':user_id' => $userId]);
     $result = $stmt->fetch(PDO::FETCH_ASSOC);
     
-    return $result ? $result['phone_number'] : null;
+    return $result ? $result['phone'] : null;
 }
 
 /**
- * Calculate delivery fee based on location
+ * Update user's phone number
+ */
+function updateUserPhone($conn, $userId, $phoneNumber) {
+    $stmt = $conn->prepare(
+        "UPDATE users SET phone = :phone, updated_at = NOW() WHERE id = :user_id"
+    );
+    $stmt->execute([
+        ':phone' => $phoneNumber,
+        ':user_id' => $userId
+    ]);
+}
+
+/**
+ * Calculate delivery fee based on location - FIXED: uses base_delivery_fee
  */
 function calculateDeliveryFee($conn, $location) {
-    // Default delivery fee (can be stored in database or config)
     $defaultFee = 0;
     
     if (!$location) {
         return $defaultFee;
     }
     
-    // Check if location has specific delivery fee
     $stmt = $conn->prepare(
-        "SELECT delivery_fee FROM delivery_zones 
-         WHERE zone_name = :location OR :location LIKE CONCAT('%', zone_name, '%')
+        "SELECT base_delivery_fee FROM delivery_zones 
+         WHERE zone_name = :location AND is_active = 1
          LIMIT 1"
     );
     $stmt->execute([':location' => $location]);
     $result = $stmt->fetch(PDO::FETCH_ASSOC);
     
-    return $result ? floatval($result['delivery_fee']) : $defaultFee;
+    return $result ? floatval($result['base_delivery_fee']) : $defaultFee;
 }
 
 /**
- * Get available delivery locations
+ * Get available delivery locations from database
  */
-function getDeliveryLocations() {
-    // This can be fetched from database
-    return [
-        ['id' => 1, 'name' => 'Den', 'fee' => 0],
-        ['id' => 2, 'name' => 'The Cake Fairy Mw', 'fee' => 0],
-        ['id' => 3, 'name' => 'Chiuzim Church (Area)', 'fee' => 0],
-        ['id' => 4, 'name' => 'City Centre', 'fee' => 1500],
-        ['id' => 5, 'name' => 'Area 49', 'fee' => 2000],
-        ['id' => 6, 'name' => 'Ginnery Corner', 'fee' => 2500]
-    ];
+function getDeliveryLocations($conn) {
+    $stmt = $conn->prepare(
+        "SELECT id, zone_name as name, base_delivery_fee as fee 
+         FROM delivery_zones 
+         WHERE is_active = 1 
+         ORDER BY base_delivery_fee ASC, zone_name ASC"
+    );
+    $stmt->execute();
+    $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    if (empty($results)) {
+        // Fallback hardcoded values if no data in database
+        return [
+            ['id' => 1, 'name' => 'Den', 'fee' => 0],
+            ['id' => 2, 'name' => 'The Cake Fairy Mw', 'fee' => 0],
+            ['id' => 3, 'name' => 'Chiuzim Church (Area)', 'fee' => 0],
+            ['id' => 4, 'name' => 'City Centre', 'fee' => 1500],
+            ['id' => 5, 'name' => 'Area 49', 'fee' => 2000],
+            ['id' => 6, 'name' => 'Ginnery Corner', 'fee' => 2500]
+        ];
+    }
+    
+    return $results;
 }
 
 /**
@@ -493,23 +519,23 @@ function getEstimatedDeliveryTime() {
  * Create order
  */
 function createOrder($conn, $userId, $cart, $orderData) {
+    $orderNumber = 'ORD-' . date('Ymd') . '-' . strtoupper(substr(uniqid(), -6));
+    
     $stmt = $conn->prepare(
         "INSERT INTO orders (
             user_id, cart_id, order_number, 
             subtotal, delivery_fee, total_amount,
-            delivery_location, delivery_instructions,
-            phone_number, payment_method, order_status,
+            delivery_address, special_instructions,
+            payment_method, status,
             created_at, updated_at
         ) VALUES (
             :user_id, :cart_id, :order_number,
             :subtotal, :delivery_fee, :total_amount,
             :delivery_location, :instructions,
-            :phone_number, :payment_method, 'pending',
+            :payment_method, 'pending',
             NOW(), NOW()
         )"
     );
-    
-    $orderNumber = 'ORD-' . strtoupper(uniqid());
     
     $stmt->execute([
         ':user_id' => $userId,
@@ -520,7 +546,6 @@ function createOrder($conn, $userId, $cart, $orderData) {
         ':total_amount' => $orderData['total_amount'],
         ':delivery_location' => $orderData['delivery_location'],
         ':instructions' => $orderData['instructions'],
-        ':phone_number' => $orderData['phone_number'],
         ':payment_method' => $orderData['payment_method']
     ]);
     
@@ -540,34 +565,27 @@ function generateOrderNumber($orderId) {
 function createOrderItems($conn, $orderId, $cartItems) {
     $stmt = $conn->prepare(
         "INSERT INTO order_items (
-            order_id, cart_item_id, name, description,
-            price, quantity, total, add_ons_total, grand_total,
-            merchant_id, merchant_name, variant_name,
-            special_instructions, source_type
+            order_id, item_name, price, quantity, total,
+            add_ons_total, special_instructions, variant_data,
+            selected_options, created_at
         ) VALUES (
-            :order_id, :cart_item_id, :name, :description,
-            :price, :quantity, :total, :add_ons_total, :grand_total,
-            :merchant_id, :merchant_name, :variant_name,
-            :instructions, :source_type
+            :order_id, :name, :price, :quantity, :total,
+            :add_ons_total, :instructions, :variant_data,
+            :selected_options, NOW()
         )"
     );
     
     foreach ($cartItems as $item) {
         $stmt->execute([
             ':order_id' => $orderId,
-            ':cart_item_id' => $item['id'],
             ':name' => $item['name'],
-            ':description' => $item['description'] ?? '',
             ':price' => $item['price'],
             ':quantity' => $item['quantity'],
-            ':total' => $item['total'],
-            ':add_ons_total' => $item['add_ons_total'],
-            ':grand_total' => $item['grand_total'],
-            ':merchant_id' => $item['merchant_id'],
-            ':merchant_name' => $item['merchant_name'],
-            ':variant_name' => $item['variant_name'] ?? null,
+            ':total' => $item['grand_total'],
+            ':add_ons_total' => $item['add_ons_total'] ?? 0,
             ':instructions' => $item['special_instructions'] ?? null,
-            ':source_type' => $item['source_type'] ?? 'menu_item'
+            ':variant_data' => $item['variant_data'] ?? null,
+            ':selected_options' => $item['selected_options'] ?? null
         ]);
     }
 }
@@ -585,7 +603,7 @@ function clearCartAfterOrder($conn, $cartId) {
     
     // Delete add-ons
     $itemsStmt = $conn->prepare(
-        "SELECT id FROM cart_items WHERE cart_id = :cart_id"
+        "SELECT id FROM cart_items WHERE cart_id = :cart_id AND is_active = 0"
     );
     $itemsStmt->execute([':cart_id' => $cartId]);
     $items = $itemsStmt->fetchAll(PDO::FETCH_ASSOC);
@@ -668,7 +686,7 @@ function renderCheckoutPage() {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Checkout - The Cake Fairy</title>
+        <title>Checkout - DropX</title>
         <style>
             * {
                 margin: 0;
@@ -898,11 +916,6 @@ function renderCheckoutPage() {
                 }
             }
             
-            .loading {
-                opacity: 0.6;
-                pointer-events: none;
-            }
-            
             .toast {
                 position: fixed;
                 bottom: 20px;
@@ -927,6 +940,33 @@ function renderCheckoutPage() {
                     transform: translateX(-50%) translateY(0);
                 }
             }
+            
+            .loading-overlay {
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0,0,0,0.5);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                z-index: 2000;
+            }
+            
+            .spinner {
+                width: 40px;
+                height: 40px;
+                border: 4px solid #f3f3f3;
+                border-top: 4px solid #e91e63;
+                border-radius: 50%;
+                animation: spin 1s linear infinite;
+            }
+            
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
         </style>
     </head>
     <body>
@@ -942,7 +982,7 @@ function renderCheckoutPage() {
                             <span>🚚</span> Delivery
                         </div>
                         <div class="location-selector" id="locationSelector">
-                            <!-- Locations will be populated here -->
+                            <div class="loading-spinner">Loading locations...</div>
                         </div>
                         <button class="adjust-pin-btn" id="adjustPinBtn" style="margin-top: 12px;">
                             Adjust Pin
@@ -979,8 +1019,7 @@ function renderCheckoutPage() {
                             type="tel" 
                             class="phone-input" 
                             id="phoneInput" 
-                            placeholder="+265 998 969 229"
-                            value="+265998969229"
+                            placeholder="Enter your phone number"
                         />
                     </div>
                 </div>
@@ -988,7 +1027,7 @@ function renderCheckoutPage() {
                 <div class="order-summary" id="orderSummary">
                     <div class="section-title">Order Summary</div>
                     <div id="cartItemsContainer">
-                        <!-- Cart items will be populated here -->
+                        <div class="empty-cart">Loading cart...</div>
                     </div>
                     <div class="summary-row">
                         <span>Subtotal</span>
@@ -1007,11 +1046,14 @@ function renderCheckoutPage() {
             </div>
         </div>
         
+        <div id="loadingOverlay" class="loading-overlay" style="display: none;">
+            <div class="spinner"></div>
+        </div>
+        
         <script>
             let checkoutData = null;
             let selectedLocation = null;
             
-            // Load checkout data
             async function loadCheckout() {
                 try {
                     const response = await fetch(window.location.href, {
@@ -1026,26 +1068,33 @@ function renderCheckoutPage() {
                         checkoutData = data.data;
                         renderCheckout();
                     } else {
-                        showToast('Error loading checkout: ' + data.message);
+                        showToast('Error loading checkout: ' + (data.message || 'Unknown error'));
+                        document.getElementById('cartItemsContainer').innerHTML = '<div class="empty-cart">Failed to load checkout</div>';
                     }
                 } catch (error) {
                     console.error('Error:', error);
                     showToast('Failed to load checkout data');
+                    document.getElementById('cartItemsContainer').innerHTML = '<div class="empty-cart">Failed to load checkout</div>';
                 }
             }
             
-            // Render checkout UI
             function renderCheckout() {
+                if (!checkoutData) return;
+                
                 // Render delivery locations
                 const locations = checkoutData.delivery?.available_locations || [];
                 const locationSelector = document.getElementById('locationSelector');
                 
-                locationSelector.innerHTML = locations.map(loc => `
-                    <div class="location-badge ${selectedLocation === loc.name ? 'selected' : ''}" 
-                         data-location="${loc.name}">
-                        ${loc.name}
-                    </div>
-                `).join('');
+                if (locations.length === 0) {
+                    locationSelector.innerHTML = '<div class="empty-cart">No delivery locations available</div>';
+                } else {
+                    locationSelector.innerHTML = locations.map(loc => `
+                        <div class="location-badge ${selectedLocation === loc.name ? 'selected' : ''}" 
+                             data-location="${loc.name}">
+                            ${escapeHtml(loc.name)}
+                        </div>
+                    `).join('');
+                }
                 
                 // Add click handlers to location badges
                 document.querySelectorAll('.location-badge').forEach(el => {
@@ -1069,6 +1118,8 @@ function renderCheckoutPage() {
                 // Set phone number
                 if (checkoutData.customer?.phone_number) {
                     document.getElementById('phoneInput').value = checkoutData.customer.phone_number;
+                } else if (checkoutData.customer?.default_phone) {
+                    document.getElementById('phoneInput').value = checkoutData.customer.default_phone;
                 }
                 
                 // Render cart items
@@ -1078,7 +1129,6 @@ function renderCheckoutPage() {
                 updateOrderSummary();
             }
             
-            // Render cart items
             function renderCartItems() {
                 const items = checkoutData.cart?.items || [];
                 const container = document.getElementById('cartItemsContainer');
@@ -1091,7 +1141,7 @@ function renderCheckoutPage() {
                 
                 container.innerHTML = items.map(item => `
                     <div class="cart-item">
-                        ${item.image_url ? `<img src="${item.image_url}" class="cart-item-image" alt="${item.name}">` : '<div class="cart-item-image" style="background:#e0e0e0;"></div>'}
+                        ${item.image_url ? `<img src="${item.image_url}" class="cart-item-image" alt="${escapeHtml(item.name)}">` : '<div class="cart-item-image" style="background:#e0e0e0;"></div>'}
                         <div class="cart-item-details">
                             <div class="cart-item-name">${escapeHtml(item.name)}</div>
                             <div class="cart-item-price">MWK ${formatNumber(item.grand_total)}</div>
@@ -1105,18 +1155,16 @@ function renderCheckoutPage() {
                 document.getElementById('placeOrderBtn').disabled = false;
             }
             
-            // Update order summary
             function updateOrderSummary() {
                 const subtotal = checkoutData.order_summary?.subtotal || 0;
                 const deliveryFee = checkoutData.order_summary?.delivery_fee || 0;
                 const total = checkoutData.order_summary?.total || 0;
                 
                 document.getElementById('subtotal').textContent = `MWK ${formatNumber(subtotal)}`;
-                document.getElementById('deliveryFee').textContent = `MWK ${formatNumber(deliveryFee)}`;
+                document.getElementById('deliveryFee').textContent = deliveryFee === 0 ? 'Free' : `MWK ${formatNumber(deliveryFee)}`;
                 document.getElementById('total').textContent = `MWK ${formatNumber(total)}`;
             }
             
-            // Select location
             function selectLocation(locationName) {
                 selectedLocation = locationName;
                 document.getElementById('selectedLocationDisplay').textContent = locationName;
@@ -1135,19 +1183,18 @@ function renderCheckoutPage() {
                 const deliveryFee = location ? location.fee : 0;
                 const subtotal = checkoutData.order_summary?.subtotal || 0;
                 
-                document.getElementById('deliveryFee').textContent = `MWK ${formatNumber(deliveryFee)}`;
+                document.getElementById('deliveryFee').textContent = deliveryFee === 0 ? 'Free' : `MWK ${formatNumber(deliveryFee)}`;
                 document.getElementById('total').textContent = `MWK ${formatNumber(subtotal + deliveryFee)}`;
             }
             
-            // Place order
             async function placeOrder() {
                 if (!selectedLocation) {
                     showToast('Please select a delivery location');
                     return;
                 }
                 
-                const phoneNumber = document.getElementById('phoneInput').value;
-                if (!phoneNumber || phoneNumber === '+265') {
+                const phoneNumber = document.getElementById('phoneInput').value.trim();
+                if (!phoneNumber || phoneNumber.length < 10) {
                     showToast('Please enter a valid phone number');
                     return;
                 }
@@ -1162,8 +1209,11 @@ function renderCheckoutPage() {
                 };
                 
                 const btn = document.getElementById('placeOrderBtn');
+                const overlay = document.getElementById('loadingOverlay');
+                
                 btn.disabled = true;
                 btn.textContent = 'Placing Order...';
+                overlay.style.display = 'flex';
                 
                 try {
                     const response = await fetch(window.location.href, {
@@ -1177,6 +1227,8 @@ function renderCheckoutPage() {
                     
                     const data = await response.json();
                     
+                    overlay.style.display = 'none';
+                    
                     if (data.success) {
                         showToast('Order placed successfully!');
                         setTimeout(() => {
@@ -1189,13 +1241,13 @@ function renderCheckoutPage() {
                     }
                 } catch (error) {
                     console.error('Error:', error);
+                    overlay.style.display = 'none';
                     showToast('Failed to place order. Please try again.');
                     btn.disabled = false;
                     btn.textContent = 'Place Order';
                 }
             }
             
-            // Helper functions
             function formatNumber(num) {
                 return Number(num).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
             }
@@ -1226,7 +1278,6 @@ function renderCheckoutPage() {
             
             // Event listeners
             document.getElementById('setLocationBtn').addEventListener('click', () => {
-                // Show location modal or scroll to location selector
                 document.getElementById('locationSelector').scrollIntoView({ behavior: 'smooth' });
             });
             
