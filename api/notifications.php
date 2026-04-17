@@ -1,7 +1,7 @@
 <?php
 /*********************************
  * FIREBASE CLOUD MESSAGING (FCM)
- * Complete Production Implementation - FCM v1
+ * Customer App Implementation - Receive & Auto Notifications
  *********************************/
 
 // CORS Configuration
@@ -30,10 +30,8 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-// Firebase Configuration - FCM v1 (Production)
-define('FCM_USE_V1', true); // Use FCM v1 API
+// Firebase Configuration - FCM v1
 define('FCM_API_URL_V1', 'https://fcm.googleapis.com/v1/projects/');
-define('FCM_LEGACY_URL', 'https://fcm.googleapis.com/fcm/send');
 
 // Include required files
 require_once __DIR__ . '/../config/database.php';
@@ -47,17 +45,12 @@ try {
         ResponseHandler::error('Database connection failed', 500);
     }
     
-    // Check authentication for protected endpoints
-    $protectedEndpoints = ['send', 'broadcast', 'statistics', 'preferences'];
-    $action = $_GET['action'] ?? ($_POST['action'] ?? '');
-    
-    if (in_array($action, $protectedEndpoints) || $_SERVER['REQUEST_METHOD'] === 'GET') {
-        if (empty($_SESSION['user_id']) || empty($_SESSION['logged_in'])) {
-            ResponseHandler::error('Authentication required', 401);
-        }
+    // Check authentication for all customer endpoints
+    if (empty($_SESSION['user_id']) || empty($_SESSION['logged_in'])) {
+        ResponseHandler::error('Authentication required', 401);
     }
     
-    $userId = $_SESSION['user_id'] ?? null;
+    $userId = $_SESSION['user_id'];
     
     // Route the request
     $method = $_SERVER['REQUEST_METHOD'];
@@ -123,12 +116,6 @@ function handlePostRequest($conn, $userId, $input) {
         case 'unregister_device':
             unregisterDeviceToken($conn, $userId, $input);
             break;
-        case 'send':
-            sendPushNotification($conn, $userId, $input);
-            break;
-        case 'broadcast':
-            sendBroadcastNotification($conn, $userId, $input);
-            break;
         case 'mark_all_read':
             markAllAsRead($conn, $userId, $input);
             break;
@@ -141,11 +128,11 @@ function handlePostRequest($conn, $userId, $input) {
         case 'update_preferences':
             updateNotificationPreferences($conn, $userId, $input);
             break;
-        case 'test_push':
-            testPushNotification($conn, $userId, $input);
+        case 'sync_fcm_token':
+            syncFCMToken($conn, $userId, $input);
             break;
         default:
-            ResponseHandler::error('Invalid action: ' . $action, 400);
+            ResponseHandler::error('Invalid action', 400);
     }
 }
 
@@ -327,7 +314,8 @@ function getNotificationStatistics($conn, $userId) {
  *********************************/
 function getNotificationPreferences($conn, $userId) {
     $stmt = $conn->prepare(
-        "SELECT * FROM user_notification_settings WHERE user_id = :user_id"
+        "SELECT push_enabled, order_updates, promotional_offers, special_offers 
+         FROM user_notification_settings WHERE user_id = :user_id"
     );
     $stmt->execute([':user_id' => $userId]);
     $preferences = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -335,11 +323,8 @@ function getNotificationPreferences($conn, $userId) {
     if (!$preferences) {
         $preferences = [
             'push_enabled' => true,
-            'email_enabled' => true,
-            'sms_enabled' => false,
             'order_updates' => true,
             'promotional_offers' => true,
-            'new_merchants' => true,
             'special_offers' => true
         ];
     }
@@ -353,7 +338,7 @@ function getNotificationPreferences($conn, $userId) {
 function getUserDevices($conn, $userId) {
     $stmt = $conn->prepare(
         "SELECT id, device_type, device_name, device_model, app_version, 
-                os_version, is_active, is_subscribed, last_active, created_at
+                os_version, is_active, last_active, created_at
          FROM user_devices WHERE user_id = :user_id AND is_active = 1"
     );
     $stmt->execute([':user_id' => $userId]);
@@ -404,7 +389,7 @@ function registerDeviceToken($conn, $userId, $input) {
         // Update existing
         $stmt = $conn->prepare(
             "UPDATE user_devices 
-             SET is_active = 1, is_subscribed = 1, device_type = :device_type,
+             SET is_active = 1, device_type = :device_type,
                  device_name = :device_name, device_model = :device_model,
                  app_version = :app_version, os_version = :os_version,
                  last_active = NOW(), updated_at = NOW()
@@ -415,10 +400,10 @@ function registerDeviceToken($conn, $userId, $input) {
         $stmt = $conn->prepare(
             "INSERT INTO user_devices 
              (user_id, fcm_token, device_type, device_name, device_model, 
-              app_version, os_version, is_active, is_subscribed, created_at, last_active)
+              app_version, os_version, is_active, created_at, last_active)
              VALUES 
              (:user_id, :fcm_token, :device_type, :device_name, :device_model,
-              :app_version, :os_version, 1, 1, NOW(), NOW())"
+              :app_version, :os_version, 1, NOW(), NOW())"
         );
     }
     
@@ -432,7 +417,7 @@ function registerDeviceToken($conn, $userId, $input) {
         ':os_version' => $osVersion
     ]);
     
-    ResponseHandler::success(['message' => 'Device registered successfully', 'token' => $fcmToken]);
+    ResponseHandler::success(['message' => 'Device registered successfully']);
 }
 
 /*********************************
@@ -458,441 +443,29 @@ function unregisterDeviceToken($conn, $userId, $input) {
 }
 
 /*********************************
- * SEND PUSH NOTIFICATION
+ * SYNC FCM TOKEN (for token refresh)
  *********************************/
-function sendPushNotification($conn, $userId, $input) {
-    $title = $input['title'] ?? '';
-    $message = $input['message'] ?? '';
-    $type = $input['type'] ?? 'system';
-    $data = $input['data'] ?? [];
-    $saveToDatabase = $input['save_to_database'] ?? true;
+function syncFCMToken($conn, $userId, $input) {
+    $oldToken = $input['old_token'] ?? '';
+    $newToken = $input['new_token'] ?? '';
     
-    if (empty($title) || empty($message)) {
-        ResponseHandler::error('Title and message are required', 400);
+    if (empty($oldToken) || empty($newToken)) {
+        ResponseHandler::error('Both old and new tokens are required', 400);
     }
     
-    // Save notification to database
-    $notificationId = null;
-    if ($saveToDatabase) {
-        $stmt = $conn->prepare(
-            "INSERT INTO notifications (user_id, type, title, message, data, created_at)
-             VALUES (:user_id, :type, :title, :message, :data, NOW())"
-        );
-        $stmt->execute([
-            ':user_id' => $userId,
-            ':type' => $type,
-            ':title' => $title,
-            ':message' => $message,
-            ':data' => json_encode($data)
-        ]);
-        $notificationId = $conn->lastInsertId();
-    }
-    
-    // Send FCM push using v1
-    $result = sendFCMv1ToUser($conn, $userId, $title, $message, $type, $data, $notificationId);
-    
-    ResponseHandler::success([
-        'notification_sent' => $result,
-        'notification_id' => $notificationId,
-        'message' => $result['success'] ? 'Push notification sent successfully' : 'Failed to send push notification'
-    ]);
-}
-
-/*********************************
- * SEND BROADCAST NOTIFICATION
- *********************************/
-function sendBroadcastNotification($conn, $userId, $input) {
-    $title = $input['title'] ?? '';
-    $message = $input['message'] ?? '';
-    $type = $input['type'] ?? 'system';
-    $data = $input['data'] ?? [];
-    $topic = $input['topic'] ?? 'all_users';
-    
-    if (empty($title) || empty($message)) {
-        ResponseHandler::error('Title and message are required', 400);
-    }
-    
-    // Verify admin permission
-    if (!isAdmin($conn, $userId)) {
-        ResponseHandler::error('Admin permission required', 403);
-    }
-    
-    // Send to FCM topic using v1
-    $result = sendFCMv1ToTopic($topic, $title, $message, $type, $data);
-    
-    // Log broadcast
+    // Deactivate old token
     $stmt = $conn->prepare(
-        "INSERT INTO push_notification_logs 
-         (user_id, type, title, message, device_count, success_count, failed_count, response, created_at)
-         VALUES 
-         (:user_id, :type, :title, :message, 0, :success, :failed, :response, NOW())"
+        "UPDATE user_devices SET is_active = 0, updated_at = NOW()
+         WHERE user_id = :user_id AND fcm_token = :old_token"
     );
     $stmt->execute([
         ':user_id' => $userId,
-        ':type' => $type,
-        ':title' => $title,
-        ':message' => $message,
-        ':success' => $result['successful'] ?? 0,
-        ':failed' => $result['failed'] ?? 0,
-        ':response' => json_encode($result)
+        ':old_token' => $oldToken
     ]);
     
-    ResponseHandler::success([
-        'broadcast_sent' => $result,
-        'message' => 'Broadcast notification sent'
-    ]);
-}
-
-/*********************************
- * GET FIREBASE SERVICE ACCOUNT CREDENTIALS
- *********************************/
-function getFirebaseServiceAccount() {
-    // Get from environment variable (Railway)
-    $jsonStr = getenv('FIREBASE_SERVICE_ACCOUNT_JSON');
-    
-    if (!$jsonStr) {
-        error_log("FIREBASE_SERVICE_ACCOUNT_JSON environment variable not set");
-        return null;
-    }
-    
-    $serviceAccount = json_decode($jsonStr, true);
-    if (!$serviceAccount || !isset($serviceAccount['project_id'])) {
-        error_log("Invalid Firebase service account JSON");
-        return null;
-    }
-    
-    return $serviceAccount;
-}
-
-/*********************************
- * GET FIREBASE ACCESS TOKEN (OAuth2)
- *********************************/
-function getFirebaseAccessToken() {
-    $serviceAccount = getFirebaseServiceAccount();
-    if (!$serviceAccount) {
-        return null;
-    }
-    
-    // Create JWT header and payload
-    $header = base64_encode(json_encode(['alg' => 'RS256', 'typ' => 'JWT']));
-    
-    $claims = [
-        'iss' => $serviceAccount['client_email'],
-        'scope' => 'https://www.googleapis.com/auth/firebase.messaging',
-        'aud' => 'https://oauth2.googleapis.com/token',
-        'exp' => time() + 3600,
-        'iat' => time()
-    ];
-    $payload = base64_encode(json_encode($claims));
-    
-    // Sign the JWT
-    $privateKey = $serviceAccount['private_key'];
-    $signature = '';
-    openssl_sign($header . '.' . $payload, $signature, $privateKey, OPENSSL_ALGO_SHA256);
-    $signature = base64_encode($signature);
-    
-    $jwt = $header . '.' . $payload . '.' . $signature;
-    
-    // Exchange JWT for access token
-    $ch = curl_init('https://oauth2.googleapis.com/token');
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query([
-        'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-        'assertion' => $jwt
-    ]));
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-    
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    
-    if ($httpCode === 200) {
-        $data = json_decode($response, true);
-        return $data['access_token'] ?? null;
-    }
-    
-    error_log("Failed to get Firebase access token: " . $response);
-    return null;
-}
-
-/*********************************
- * SEND FCM V1 TO SPECIFIC USER
- *********************************/
-function sendFCMv1ToUser($conn, $userId, $title, $message, $type, $data = [], $notificationId = null) {
-    try {
-        // Check push preferences
-        $prefStmt = $conn->prepare(
-            "SELECT push_enabled FROM user_notification_settings WHERE user_id = :user_id"
-        );
-        $prefStmt->execute([':user_id' => $userId]);
-        $preferences = $prefStmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($preferences && $preferences['push_enabled'] == 0) {
-            return ['success' => false, 'error' => 'Push notifications disabled by user'];
-        }
-        
-        // Get user's active tokens
-        $tokenStmt = $conn->prepare(
-            "SELECT fcm_token FROM user_devices 
-             WHERE user_id = :user_id AND is_active = 1 AND is_subscribed = 1
-             AND fcm_token IS NOT NULL AND fcm_token != ''"
-        );
-        $tokenStmt->execute([':user_id' => $userId]);
-        $tokens = $tokenStmt->fetchAll(PDO::FETCH_COLUMN);
-        
-        if (empty($tokens)) {
-            return ['success' => false, 'error' => 'No active devices found'];
-        }
-        
-        // Get access token
-        $accessToken = getFirebaseAccessToken();
-        if (!$accessToken) {
-            return ['success' => false, 'error' => 'Failed to authenticate with Firebase'];
-        }
-        
-        $serviceAccount = getFirebaseServiceAccount();
-        $projectId = $serviceAccount['project_id'];
-        $url = FCM_API_URL_V1 . $projectId . '/messages:send';
-        
-        $successCount = 0;
-        $failedTokens = [];
-        
-        foreach ($tokens as $token) {
-            $payload = [
-                'message' => [
-                    'token' => $token,
-                    'notification' => [
-                        'title' => $title,
-                        'body' => $message
-                    ],
-                    'data' => array_merge([
-                        'type' => $type,
-                        'notification_id' => (string)($notificationId ?? ''),
-                        'title' => $title,
-                        'message' => $message,
-                        'timestamp' => date('Y-m-d H:i:s')
-                    ], $data),
-                    'android' => [
-                        'priority' => 'high',
-                        'notification' => [
-                            'sound' => 'default',
-                            'channel_id' => 'general_notifications'
-                        ]
-                    ],
-                    'apns' => [
-                        'payload' => [
-                            'aps' => [
-                                'sound' => 'default',
-                                'badge' => 1
-                            ]
-                        ]
-                    ]
-                ]
-            ];
-            
-            $headers = [
-                'Authorization: Bearer ' . $accessToken,
-                'Content-Type: application/json'
-            ];
-            
-            $ch = curl_init($url);
-            curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-            curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-            
-            $response = curl_exec($ch);
-            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-            
-            if ($httpCode === 200) {
-                $successCount++;
-            } else {
-                $failedTokens[] = $token;
-                error_log("FCM v1 send failed for token $token: HTTP $httpCode - $response");
-            }
-        }
-        
-        // Clean up invalid tokens
-        if (!empty($failedTokens)) {
-            $placeholders = implode(',', array_fill(0, count($failedTokens), '?'));
-            $cleanStmt = $conn->prepare(
-                "UPDATE user_devices SET is_active = 0 
-                 WHERE fcm_token IN ($placeholders)"
-            );
-            $cleanStmt->execute($failedTokens);
-        }
-        
-        // Update notification with push status
-        if ($notificationId && $successCount > 0) {
-            $updateStmt = $conn->prepare(
-                "UPDATE notifications 
-                 SET sent_via = CONCAT(IFNULL(sent_via, ''), ',push'), sent_at = NOW()
-                 WHERE id = :id"
-            );
-            $updateStmt->execute([':id' => $notificationId]);
-        }
-        
-        $result = [
-            'success' => $successCount > 0,
-            'sent_to' => $successCount,
-            'total' => count($tokens),
-            'failed' => count($failedTokens)
-        ];
-        
-        // Log attempt
-        logPushAttempt($conn, $userId, $notificationId, $type, $title, $message, 
-                      count($tokens), $result);
-        
-        return $result;
-        
-    } catch (Exception $e) {
-        error_log("FCM v1 send error: " . $e->getMessage());
-        return ['success' => false, 'error' => $e->getMessage()];
-    }
-}
-
-/*********************************
- * SEND FCM V1 TO TOPIC
- *********************************/
-function sendFCMv1ToTopic($topic, $title, $message, $type, $data = []) {
-    $accessToken = getFirebaseAccessToken();
-    if (!$accessToken) {
-        return ['success' => false, 'error' => 'Failed to authenticate with Firebase'];
-    }
-    
-    $serviceAccount = getFirebaseServiceAccount();
-    $projectId = $serviceAccount['project_id'];
-    $url = FCM_API_URL_V1 . $projectId . '/messages:send';
-    
-    $payload = [
-        'message' => [
-            'topic' => $topic,
-            'notification' => [
-                'title' => $title,
-                'body' => $message
-            ],
-            'data' => array_merge([
-                'type' => $type,
-                'title' => $title,
-                'message' => $message,
-                'timestamp' => date('Y-m-d H:i:s')
-            ], $data),
-            'android' => [
-                'priority' => 'high',
-                'notification' => [
-                    'sound' => 'default',
-                    'channel_id' => 'general_notifications'
-                ]
-            ],
-            'apns' => [
-                'payload' => [
-                    'aps' => [
-                        'sound' => 'default',
-                        'badge' => 1
-                    ]
-                ]
-            ]
-        ]
-    ];
-    
-    $headers = [
-        'Authorization: Bearer ' . $accessToken,
-        'Content-Type: application/json'
-    ];
-    
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-    
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    
-    if ($httpCode === 200) {
-        return [
-            'success' => true,
-            'successful' => 1,
-            'failed' => 0,
-            'http_code' => $httpCode,
-            'response' => json_decode($response, true)
-        ];
-    } else {
-        return [
-            'success' => false,
-            'error' => "HTTP $httpCode: $response",
-            'http_code' => $httpCode,
-            'response' => json_decode($response, true)
-        ];
-    }
-}
-
-/*********************************
- * LOG PUSH ATTEMPT
- *********************************/
-function logPushAttempt($conn, $userId, $notificationId, $type, $title, $message, $deviceCount, $result) {
-    try {
-        $stmt = $conn->prepare(
-            "INSERT INTO push_notification_logs 
-             (user_id, notification_id, type, title, message, device_count, 
-              success_count, failed_count, http_code, response, error_message, status, created_at)
-             VALUES 
-             (:user_id, :notification_id, :type, :title, :message, :device_count,
-              :success_count, :failed_count, :http_code, :response, :error_message, :status, NOW())"
-        );
-        
-        $status = $result['success'] ? 'success' : 'failed';
-        
-        $stmt->execute([
-            ':user_id' => $userId,
-            ':notification_id' => $notificationId,
-            ':type' => $type,
-            ':title' => $title,
-            ':message' => $message,
-            ':device_count' => $deviceCount,
-            ':success_count' => $result['sent_to'] ?? 0,
-            ':failed_count' => $result['failed'] ?? 0,
-            ':http_code' => $result['http_code'] ?? 0,
-            ':response' => json_encode($result['response'] ?? []),
-            ':error_message' => $result['error'] ?? null,
-            ':status' => $status
-        ]);
-    } catch (Exception $e) {
-        error_log("Failed to log push attempt: " . $e->getMessage());
-    }
-}
-
-function testPushNotification($conn, $userId, $input) {
-    $title = $input['title'] ?? 'Test Notification ✅';
-    $message = $input['message'] ?? 'Your FCM v1 is working correctly!';
-
-    // 🔥 HARD DEBUG
-    $debugStmt = $conn->prepare("SELECT fcm_token FROM user_devices WHERE user_id = :user_id");
-    $debugStmt->execute([':user_id' => $userId]);
-    $allTokens = $debugStmt->fetchAll(PDO::FETCH_COLUMN);
-
-    $result = sendFCMv1ToUser(
-        $conn,
-        $userId,
-        $title,
-        $message,
-        'test',
-        ['test' => true]
-    );
-
-    ResponseHandler::success([
-        'debug_user_id' => $userId,
-        'tokens_in_db' => $allTokens,
-        'test_result' => $result
-    ]);
+    // Register new token
+    $input['fcm_token'] = $newToken;
+    registerDeviceToken($conn, $userId, $input);
 }
 
 /*********************************
@@ -932,7 +505,7 @@ function markAllAsRead($conn, $userId, $data) {
     
     ResponseHandler::success([
         'marked_count' => $stmt->rowCount(),
-        'message' => 'All notifications marked as read'
+        'message' => 'Notifications marked as read'
     ]);
 }
 
@@ -1029,8 +602,7 @@ function updateNotificationPreferences($conn, $userId, $data) {
         $fields = [];
         $params = [':user_id' => $userId];
         
-        $allowedFields = ['push_enabled', 'email_enabled', 'sms_enabled', 
-                         'order_updates', 'promotional_offers', 'new_merchants', 'special_offers'];
+        $allowedFields = ['push_enabled', 'order_updates', 'promotional_offers', 'special_offers'];
         
         foreach ($allowedFields as $field) {
             if (isset($data[$field])) {
@@ -1049,20 +621,16 @@ function updateNotificationPreferences($conn, $userId, $data) {
         // Insert new
         $stmt = $conn->prepare(
             "INSERT INTO user_notification_settings 
-             (user_id, push_enabled, email_enabled, sms_enabled, 
-              order_updates, promotional_offers, new_merchants, special_offers, created_at, updated_at)
+             (user_id, push_enabled, order_updates, promotional_offers, special_offers, created_at, updated_at)
              VALUES 
-             (:user_id, :push, :email, :sms, :order, :promo, :merchants, :offers, NOW(), NOW())"
+             (:user_id, :push, :order, :promo, :offers, NOW(), NOW())"
         );
         
         $stmt->execute([
             ':user_id' => $userId,
             ':push' => $data['push_enabled'] ?? 1,
-            ':email' => $data['email_enabled'] ?? 1,
-            ':sms' => $data['sms_enabled'] ?? 0,
             ':order' => $data['order_updates'] ?? 1,
             ':promo' => $data['promotional_offers'] ?? 1,
-            ':merchants' => $data['new_merchants'] ?? 1,
             ':offers' => $data['special_offers'] ?? 1
         ]);
     }
@@ -1071,14 +639,244 @@ function updateNotificationPreferences($conn, $userId, $data) {
 }
 
 /*********************************
- * CHECK IF USER IS ADMIN
+ * AUTO CREATE NOTIFICATION (called by backend systems)
  *********************************/
-function isAdmin($conn, $userId) {
-    $stmt = $conn->prepare("SELECT role FROM users WHERE id = :id");
-    $stmt->execute([':id' => $userId]);
-    $user = $stmt->fetch(PDO::FETCH_ASSOC);
+function autoCreateNotification($conn, $userId, $type, $title, $message, $data = [], $sendPush = true) {
+    try {
+        // Check if user wants this type of notification
+        $prefStmt = $conn->prepare(
+            "SELECT push_enabled, order_updates, promotional_offers, special_offers 
+             FROM user_notification_settings WHERE user_id = :user_id"
+        );
+        $prefStmt->execute([':user_id' => $userId]);
+        $preferences = $prefStmt->fetch(PDO::FETCH_ASSOC);
+        
+        // Check preferences
+        $shouldSend = true;
+        if ($preferences) {
+            switch ($type) {
+                case 'order':
+                case 'delivery':
+                case 'payment':
+                    $shouldSend = $preferences['order_updates'] ?? true;
+                    break;
+                case 'promotion':
+                    $shouldSend = $preferences['promotional_offers'] ?? true;
+                    break;
+                case 'special_offer':
+                    $shouldSend = $preferences['special_offers'] ?? true;
+                    break;
+                default:
+                    $shouldSend = true;
+            }
+        }
+        
+        if (!$shouldSend) {
+            return ['success' => false, 'message' => 'User disabled this notification type'];
+        }
+        
+        // Save to database
+        $stmt = $conn->prepare(
+            "INSERT INTO notifications (user_id, type, title, message, data, created_at)
+             VALUES (:user_id, :type, :title, :message, :data, NOW())"
+        );
+        $stmt->execute([
+            ':user_id' => $userId,
+            ':type' => $type,
+            ':title' => $title,
+            ':message' => $message,
+            ':data' => json_encode($data)
+        ]);
+        
+        $notificationId = $conn->lastInsertId();
+        
+        // Send push notification if enabled
+        $pushSent = false;
+        if ($sendPush && $preferences && $preferences['push_enabled']) {
+            $pushSent = sendPushToUser($conn, $userId, $title, $message, $type, $data, $notificationId);
+        }
+        
+        return [
+            'success' => true,
+            'notification_id' => $notificationId,
+            'push_sent' => $pushSent
+        ];
+        
+    } catch (Exception $e) {
+        return ['success' => false, 'error' => $e->getMessage()];
+    }
+}
+
+/*********************************
+ * SEND PUSH TO SPECIFIC USER (receiving push)
+ *********************************/
+function sendPushToUser($conn, $userId, $title, $message, $type, $data = [], $notificationId = null) {
+    try {
+        // Get user's active tokens
+        $tokenStmt = $conn->prepare(
+            "SELECT fcm_token FROM user_devices 
+             WHERE user_id = :user_id AND is_active = 1
+             AND fcm_token IS NOT NULL AND fcm_token != ''"
+        );
+        $tokenStmt->execute([':user_id' => $userId]);
+        $tokens = $tokenStmt->fetchAll(PDO::FETCH_COLUMN);
+        
+        if (empty($tokens)) {
+            return false;
+        }
+        
+        // Get access token
+        $accessToken = getFirebaseAccessToken();
+        if (!$accessToken) {
+            return false;
+        }
+        
+        $serviceAccount = getFirebaseServiceAccount();
+        $projectId = $serviceAccount['project_id'];
+        $url = FCM_API_URL_V1 . $projectId . '/messages:send';
+        
+        $successCount = 0;
+        
+        foreach ($tokens as $token) {
+            $payload = [
+                'message' => [
+                    'token' => $token,
+                    'notification' => [
+                        'title' => $title,
+                        'body' => $message
+                    ],
+                    'data' => array_merge([
+                        'type' => $type,
+                        'notification_id' => (string)($notificationId ?? ''),
+                        'title' => $title,
+                        'message' => $message,
+                        'timestamp' => date('Y-m-d H:i:s')
+                    ], $data),
+                    'android' => [
+                        'priority' => 'high',
+                        'notification' => [
+                            'sound' => 'default',
+                            'channel_id' => 'customer_notifications'
+                        ]
+                    ],
+                    'apns' => [
+                        'payload' => [
+                            'aps' => [
+                                'sound' => 'default',
+                                'badge' => 1
+                            ]
+                        ]
+                    ]
+                ]
+            ];
+            
+            $headers = [
+                'Authorization: Bearer ' . $accessToken,
+                'Content-Type: application/json'
+            ];
+            
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+            curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+            
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            
+            if ($httpCode === 200) {
+                $successCount++;
+            }
+        }
+        
+        // Update notification with push status
+        if ($notificationId && $successCount > 0) {
+            $updateStmt = $conn->prepare(
+                "UPDATE notifications 
+                 SET sent_via = CONCAT(IFNULL(sent_via, ''), ',push'), sent_at = NOW()
+                 WHERE id = :id"
+            );
+            $updateStmt->execute([':id' => $notificationId]);
+        }
+        
+        return $successCount > 0;
+        
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+/*********************************
+ * GET FIREBASE SERVICE ACCOUNT CREDENTIALS
+ *********************************/
+function getFirebaseServiceAccount() {
+    $jsonStr = getenv('FIREBASE_SERVICE_ACCOUNT_JSON');
     
-    return $user && in_array($user['role'], ['admin', 'super_admin']);
+    if (!$jsonStr) {
+        return null;
+    }
+    
+    $serviceAccount = json_decode($jsonStr, true);
+    if (!$serviceAccount || !isset($serviceAccount['project_id'])) {
+        return null;
+    }
+    
+    return $serviceAccount;
+}
+
+/*********************************
+ * GET FIREBASE ACCESS TOKEN (OAuth2)
+ *********************************/
+function getFirebaseAccessToken() {
+    $serviceAccount = getFirebaseServiceAccount();
+    if (!$serviceAccount) {
+        return null;
+    }
+    
+    // Create JWT header and payload
+    $header = base64_encode(json_encode(['alg' => 'RS256', 'typ' => 'JWT']));
+    
+    $claims = [
+        'iss' => $serviceAccount['client_email'],
+        'scope' => 'https://www.googleapis.com/auth/firebase.messaging',
+        'aud' => 'https://oauth2.googleapis.com/token',
+        'exp' => time() + 3600,
+        'iat' => time()
+    ];
+    $payload = base64_encode(json_encode($claims));
+    
+    // Sign the JWT
+    $privateKey = $serviceAccount['private_key'];
+    $signature = '';
+    openssl_sign($header . '.' . $payload, $signature, $privateKey, OPENSSL_ALGO_SHA256);
+    $signature = base64_encode($signature);
+    
+    $jwt = $header . '.' . $payload . '.' . $signature;
+    
+    // Exchange JWT for access token
+    $ch = curl_init('https://oauth2.googleapis.com/token');
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query([
+        'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        'assertion' => $jwt
+    ]));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($httpCode === 200) {
+        $data = json_decode($response, true);
+        return $data['access_token'] ?? null;
+    }
+    
+    return null;
 }
 
 /*********************************
@@ -1094,7 +892,8 @@ function formatNotificationData($notification) {
         'payment' => 'payment',
         'system' => 'notifications',
         'update' => 'update',
-        'test' => 'check_circle'
+        'special_offer' => 'star',
+        'reminder' => 'alarm'
     ];
     
     $data = [];
@@ -1116,4 +915,5 @@ function formatNotificationData($notification) {
         'icon' => $iconMap[$type] ?? 'notifications'
     ];
 }
+
 ?>
