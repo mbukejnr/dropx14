@@ -1,10 +1,6 @@
 <?php
 /*********************************
  * CHECKOUT API
- * Dynamically calculates delivery fee based on distance
- * Integrates with cart.php for cart management
- * Payment-first flow with proper transaction handling
- * UPDATED: Works with Cookie-based authentication
  *********************************/
 
 ob_start();
@@ -15,7 +11,7 @@ ob_start();
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Credentials: true");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-Session-Token, Cookie");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
 header("Access-Control-Max-Age: 3600");
 header("Content-Type: application/json; charset=UTF-8");
 header("Cache-Control: no-store, no-cache, must-revalidate");
@@ -28,28 +24,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 /*********************************
  * SESSION CONFIG
  *********************************/
-// Initialize session with proper settings for cross-platform
 if (session_status() === PHP_SESSION_NONE) {
-    $isLocal = ($_SERVER['HTTP_HOST'] === 'localhost' || $_SERVER['SERVER_NAME'] === 'localhost');
-    
-    // Allow session to work with cookies from Flutter
-    if ($isLocal) {
-        session_set_cookie_params([
-            'lifetime' => 86400 * 30,
-            'path' => '/',
-            'httponly' => false,  // Set to false so Flutter can access
-            'samesite' => 'Lax'
-        ]);
-    } else {
-        session_set_cookie_params([
-            'lifetime' => 86400 * 30,
-            'path' => '/',
-            'domain' => '',
-            'secure' => true,
-            'httponly' => false,  // Set to false so Flutter can access
-            'samesite' => 'None'
-        ]);
-    }
     session_start();
 }
 
@@ -92,67 +67,25 @@ define('DROPX_AIRTEL_MONEY_NUMBER', '0999000000');
 define('DROPX_TNM_MPAMBA_NUMBER', '0888000000');
 
 /*********************************
- * IMPROVED AUTHENTICATION - Works with Cookies
+ * AUTHENTICATION - SIMPLE SESSION CHECK
  *********************************/
-function checkAuthentication() {
-    // Start session if not already started
-    if (session_status() === PHP_SESSION_NONE) {
-        session_start();
-    }
-    
-    // Log authentication attempt for debugging
-    error_log("=== AUTHENTICATION CHECK ===");
-    error_log("Session ID: " . session_id());
-    error_log("Session user_id: " . ($_SESSION['user_id'] ?? 'NOT SET'));
-    error_log("Session logged_in: " . ($_SESSION['logged_in'] ?? 'NOT SET'));
-    error_log("Cookie header: " . ($_SERVER['HTTP_COOKIE'] ?? 'NOT SET'));
-    
-    // Method 1: Check PHP session (works with cookies from Flutter)
-    if (!empty($_SESSION['user_id']) && !empty($_SESSION['logged_in']) && $_SESSION['logged_in'] === true) {
-        error_log("✅ Authentication successful via SESSION. User ID: " . $_SESSION['user_id']);
-        return $_SESSION['user_id'];
-    }
-    
-    // Method 2: Check for session token in header (alternative for Flutter)
-    $sessionToken = $_SERVER['HTTP_X_SESSION_TOKEN'] ?? null;
-    if ($sessionToken) {
-        // Try to restore session by token
-        $oldSessionId = session_id();
-        session_id($sessionToken);
-        session_start();
-        
-        if (!empty($_SESSION['user_id']) && !empty($_SESSION['logged_in'])) {
-            error_log("✅ Authentication successful via X-Session-Token. User ID: " . $_SESSION['user_id']);
-            return $_SESSION['user_id'];
-        }
-        
-        // Restore original session ID
-        session_id($oldSessionId);
-        session_start();
-    }
-    
-    // Method 3: Check for user ID header (fallback for direct API calls)
-    $userId = $_SERVER['HTTP_X_USER_ID'] ?? null;
-    if ($userId && is_numeric($userId)) {
-        error_log("⚠️ Authentication via X-User-ID header (less secure). User ID: " . $userId);
-        // For security, we should validate this against a token
-        // But for now, accept it as fallback
-        return (int)$userId;
-    }
-    
-    // Method 4: Try to restore session from PHPSESSID cookie
-    if (isset($_COOKIE['PHPSESSID'])) {
-        session_id($_COOKIE['PHPSESSID']);
-        session_start();
-        
-        if (!empty($_SESSION['user_id']) && !empty($_SESSION['logged_in'])) {
-            error_log("✅ Authentication successful via PHPSESSID cookie. User ID: " . $_SESSION['user_id']);
-            return $_SESSION['user_id'];
-        }
-    }
-    
-    error_log("❌ Authentication FAILED - No valid session found");
-    return null;
+// Simple authentication - same as your working files
+if (!isset($_SESSION['user_id']) || !isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
+    ResponseHandler::error('Authentication required. Please log in again.', 401);
+    exit();
+}
+
+$userId = $_SESSION['user_id'];
+
+/*********************************
+ * DATABASE CONNECTION
+ *********************************/
+$db = new Database();
+$conn = $db->getConnection();
+
+if (!$conn) {
+    ResponseHandler::error('Database connection failed', 500);
+    exit();
 }
 
 /*********************************
@@ -753,22 +686,6 @@ try {
     if (!$input) {
         $input = $_POST;
     }
-    
-    $userId = checkAuthentication();
-    
-    if (!$userId) {
-        ob_clean();
-        ResponseHandler::error('Authentication required. Please log in again.', 401);
-        exit();
-    }
-    
-    $db = new Database();
-    $conn = $db->getConnection();
-    
-    if (!$conn) {
-        ResponseHandler::error('Database connection failed', 500);
-        exit();
-    }
 
     if ($method === 'GET') {
         $cart = getActiveCart($conn, $userId);
@@ -1064,8 +981,7 @@ try {
     }
 
 } catch (Exception $e) {
-    error_log("Checkout API Error: " . $e->getMessage());
     ob_clean();
-    ResponseHandler::error('Server error occurred: ' . $e->getMessage(), 500);
+    ResponseHandler::error('Server error occurred', 500);
 }
 ?>
