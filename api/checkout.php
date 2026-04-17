@@ -1,9 +1,12 @@
 <?php
 /*********************************
- * CHECKOUT API
+ * CHECKOUT API - SAME AUTH PATTERN AS CART.PHP & ORDERS.PHP
  *********************************/
 
 ob_start();
+
+ini_set('display_errors', 0);
+error_reporting(E_ALL & ~E_WARNING & ~E_NOTICE);
 
 /*********************************
  * CORS Configuration
@@ -11,7 +14,7 @@ ob_start();
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Credentials: true");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-Session-Token");
 header("Access-Control-Max-Age: 3600");
 header("Content-Type: application/json; charset=UTF-8");
 header("Cache-Control: no-store, no-cache, must-revalidate");
@@ -21,12 +24,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
+set_error_handler(function($errno, $errstr, $errfile, $errline) {
+    if (strpos($errstr, 'Undefined array key') !== false) {
+        return true;
+    }
+    throw new ErrorException($errstr, 0, $errno, $errfile, $errline);
+});
+
 /*********************************
- * SESSION CONFIG
+ * SESSION CONFIG - MATCHING CART.PHP & ORDERS.PHP
  *********************************/
 if (session_status() === PHP_SESSION_NONE) {
+    session_set_cookie_params([
+        'lifetime' => 86400 * 30,
+        'path' => '/',
+        'domain' => '',
+        'secure' => true,
+        'httponly' => true,
+        'samesite' => 'None'
+    ]);
     session_start();
 }
+
+$baseUrl = "https://dropx13-production.up.railway.app";
 
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../includes/ResponseHandler.php';
@@ -67,614 +87,28 @@ define('DROPX_AIRTEL_MONEY_NUMBER', '0999000000');
 define('DROPX_TNM_MPAMBA_NUMBER', '0888000000');
 
 /*********************************
- * AUTHENTICATION - SIMPLE SESSION CHECK
+ * AUTHENTICATION - EXACT SAME AS CART.PHP & ORDERS.PHP
  *********************************/
-// Simple authentication - same as your working files
-if (!isset($_SESSION['user_id']) || !isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
-    ResponseHandler::error('Authentication required. Please log in again.', 401);
-    exit();
-}
-
-$userId = $_SESSION['user_id'];
-
-/*********************************
- * DATABASE CONNECTION
- *********************************/
-$db = new Database();
-$conn = $db->getConnection();
-
-if (!$conn) {
-    ResponseHandler::error('Database connection failed', 500);
-    exit();
-}
-
-/*********************************
- * CART FUNCTIONS
- *********************************/
-function getActiveCart($conn, $userId) {
-    $stmt = $conn->prepare("
-        SELECT id, user_id, status, applied_promotion_id, applied_discount 
-        FROM carts 
-        WHERE user_id = :user_id AND status = 'active'
-        ORDER BY created_at DESC LIMIT 1
-    ");
-    $stmt->execute([':user_id' => $userId]);
-    return $stmt->fetch(PDO::FETCH_ASSOC);
-}
-
-function getCartItemsWithDetails($conn, $cartId) {
-    $stmt = $conn->prepare("
-        SELECT 
-            ci.id,
-            ci.menu_item_id,
-            ci.quantity,
-            ci.name as item_name,
-            ci.price,
-            ci.total,
-            ci.grand_total,
-            ci.add_ons_total,
-            ci.merchant_id,
-            ci.merchant_name,
-            ci.variant_data,
-            ci.selected_options,
-            ci.special_instructions,
-            ci.image_url,
-            ci.category,
-            ci.measurement_type,
-            ci.unit,
-            ci.has_variants,
-            ci.variant_name,
-            ci.source_type
-        FROM cart_items ci
-        WHERE ci.cart_id = :cart_id 
-        AND ci.is_active = 1 
-        AND ci.is_saved_for_later = 0
-        ORDER BY ci.created_at DESC
-    ");
-    $stmt->execute([':cart_id' => $cartId]);
-    $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+function checkAuthentication() {
+    $sessionToken = $_SERVER['HTTP_X_SESSION_TOKEN'] ?? null;
     
-    foreach ($items as &$item) {
-        try {
-            $addonStmt = $conn->prepare("
-                SELECT id, name, price, quantity, total 
-                FROM cart_addons 
-                WHERE cart_item_id = :cart_item_id
-                ORDER BY created_at ASC
-            ");
-            $addonStmt->execute([':cart_item_id' => $item['id']]);
-            $item['add_ons'] = $addonStmt->fetchAll(PDO::FETCH_ASSOC);
-        } catch (Exception $e) {
-            $item['add_ons'] = [];
-        }
-        
-        if ($item['variant_data']) {
-            $item['variant_data'] = json_decode($item['variant_data'], true);
-        }
-        if ($item['selected_options']) {
-            $item['selected_options'] = json_decode($item['selected_options'], true);
+    if ($sessionToken) {
+        session_id($sessionToken);
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
         }
     }
     
-    return $items;
-}
-
-/*********************************
- * DELIVERY FEE CALCULATION
- *********************************/
-function getNearestMerchantBranch($conn, $merchantId, $customerLat, $customerLng) {
-    try {
-        $tableCheck = $conn->query("SHOW TABLES LIKE 'merchant_branches'");
-        if ($tableCheck->rowCount() == 0) {
-            return null;
-        }
-        
-        $stmt = $conn->prepare("
-            SELECT 
-                id,
-                branch_name,
-                address,
-                latitude,
-                longitude,
-                is_main_branch,
-                delivery_range_km,
-                (6371 * acos(
-                    cos(radians(:customer_lat)) * cos(radians(latitude)) * 
-                    cos(radians(longitude) - radians(:customer_lng)) + 
-                    sin(radians(:customer_lat)) * sin(radians(latitude))
-                )) AS distance_km
-            FROM merchant_branches
-            WHERE merchant_id = :merchant_id 
-            AND is_active = 1
-            HAVING distance_km <= COALESCE(delivery_range_km, :max_distance)
-            ORDER BY distance_km ASC
-            LIMIT 1
-        ");
-        
-        $stmt->execute([
-            ':customer_lat' => floatval($customerLat),
-            ':customer_lng' => floatval($customerLng),
-            ':merchant_id' => $merchantId,
-            ':max_distance' => MAX_DELIVERY_DISTANCE
-        ]);
-        
-        return $stmt->fetch(PDO::FETCH_ASSOC);
-    } catch (Exception $e) {
-        return null;
-    }
-}
-
-function calculateDeliveryFeeByDistance($distanceKm, $promoCode = null) {
-    $distanceKm = max(0, floatval($distanceKm));
-    
-    if ($distanceKm <= DELIVERY_BASE_DISTANCE) {
-        $fee = DELIVERY_BASE_FEE;
-    } else {
-        $extraKm = $distanceKm - DELIVERY_BASE_DISTANCE;
-        $fee = DELIVERY_BASE_FEE + ($extraKm * DELIVERY_FEE_PER_KM);
+    if (!empty($_SESSION['user_id']) && !empty($_SESSION['logged_in'])) {
+        return $_SESSION['user_id'];
     }
     
-    $fee = max(DELIVERY_FEE_MINIMUM, min(DELIVERY_FEE_MAXIMUM, $fee));
-    
-    $discount = 0;
-    if ($promoCode) {
-        $promoCode = strtoupper(trim($promoCode));
-        if ($promoCode === 'FREEDELIVERY') {
-            $discount = $fee;
-            $fee = 0;
-        } elseif ($promoCode === 'DELIVERY50') {
-            $discount = $fee * 0.5;
-            $fee = $fee * 0.5;
-        }
+    $userId = $_SERVER['HTTP_X_USER_ID'] ?? null;
+    if ($userId) {
+        return $userId;
     }
     
-    return [
-        'base_fee' => DELIVERY_BASE_FEE,
-        'distance_km' => round($distanceKm, 2),
-        'extra_km' => $distanceKm > DELIVERY_BASE_DISTANCE ? round($distanceKm - DELIVERY_BASE_DISTANCE, 2) : 0,
-        'fee_per_extra_km' => DELIVERY_FEE_PER_KM,
-        'calculated_fee' => round($fee, 2),
-        'discount' => round($discount, 2),
-        'final_fee' => round($fee, 2),
-        'breakdown' => [
-            'base_fee' => DELIVERY_BASE_FEE,
-            'distance_charge' => $distanceKm > DELIVERY_BASE_DISTANCE ? round(($distanceKm - DELIVERY_BASE_DISTANCE) * DELIVERY_FEE_PER_KM, 2) : 0,
-            'promo_discount' => round($discount, 2)
-        ]
-    ];
-}
-
-function getDynamicDeliveryFee($conn, $merchantId, $address, $promoCode = null) {
-    if (!$address || empty($address['latitude']) || empty($address['longitude'])) {
-        return [
-            'success' => true,
-            'fee' => DELIVERY_FEE_MINIMUM,
-            'base_fee' => DELIVERY_BASE_FEE,
-            'discount' => 0,
-            'distance' => 0,
-            'branch' => null,
-            'breakdown' => [],
-            'within_range' => true,
-            'using_default' => true
-        ];
-    }
-    
-    $customerLat = $address['latitude'];
-    $customerLng = $address['longitude'];
-    
-    try {
-        $nearestBranch = getNearestMerchantBranch($conn, $merchantId, $customerLat, $customerLng);
-        
-        if (!$nearestBranch) {
-            return [
-                'success' => true,
-                'fee' => DELIVERY_FEE_MINIMUM,
-                'base_fee' => DELIVERY_BASE_FEE,
-                'discount' => 0,
-                'distance' => 0,
-                'branch' => null,
-                'breakdown' => [],
-                'within_range' => true,
-                'using_default' => true
-            ];
-        }
-        
-        $distanceKm = floatval($nearestBranch['distance_km']);
-        
-        if ($distanceKm > MAX_DELIVERY_DISTANCE) {
-            return [
-                'success' => false,
-                'error' => 'Delivery not available for this location',
-                'within_range' => false,
-                'distance' => $distanceKm,
-                'fee' => DELIVERY_FEE_MAXIMUM
-            ];
-        }
-        
-        $feeCalculation = calculateDeliveryFeeByDistance($distanceKm, $promoCode);
-        
-        return [
-            'success' => true,
-            'fee' => $feeCalculation['final_fee'],
-            'base_fee' => $feeCalculation['base_fee'],
-            'discount' => $feeCalculation['discount'],
-            'distance' => $distanceKm,
-            'branch' => $nearestBranch,
-            'breakdown' => $feeCalculation['breakdown'],
-            'within_range' => true
-        ];
-        
-    } catch (Exception $e) {
-        return [
-            'success' => true,
-            'fee' => DELIVERY_FEE_MINIMUM,
-            'base_fee' => DELIVERY_BASE_FEE,
-            'discount' => 0,
-            'distance' => 0,
-            'branch' => null,
-            'breakdown' => [],
-            'within_range' => true,
-            'using_default' => true
-        ];
-    }
-}
-
-/*********************************
- * TOTALS CALCULATION
- *********************************/
-function calculateCartTotals($conn, $cartId, $userId, $items, $dynamicDeliveryFeeData = null) {
-    if (empty($items)) {
-        return null;
-    }
-    
-    $merchantIds = array_unique(array_column($items, 'merchant_id'));
-    if (count($merchantIds) > 1) {
-        return ['error' => 'Cart contains items from multiple merchants'];
-    }
-    
-    $merchantId = $merchantIds[0];
-    $merchantName = $items[0]['merchant_name'];
-    
-    $deliveryFee = DELIVERY_FEE_MINIMUM;
-    $deliveryBreakdown = null;
-    $deliveryDistance = null;
-    $deliveryBranch = null;
-    
-    if ($dynamicDeliveryFeeData && $dynamicDeliveryFeeData['success']) {
-        $deliveryFee = $dynamicDeliveryFeeData['fee'];
-        $deliveryBreakdown = $dynamicDeliveryFeeData['breakdown'] ?? null;
-        $deliveryDistance = $dynamicDeliveryFeeData['distance'] ?? null;
-        $deliveryBranch = $dynamicDeliveryFeeData['branch'] ?? null;
-    }
-    
-    $merchantStmt = $conn->prepare("
-        SELECT min_order_amount as minimum_order, preparation_time_minutes as average_preparation_time 
-        FROM merchants 
-        WHERE id = :id
-    ");
-    $merchantStmt->execute([':id' => $merchantId]);
-    $merchantData = $merchantStmt->fetch(PDO::FETCH_ASSOC);
-    
-    $minimumOrder = floatval($merchantData['minimum_order'] ?? 0);
-    $prepTime = intval($merchantData['average_preparation_time'] ?? 20);
-    
-    $subtotal = 0;
-    $itemCount = 0;
-    $totalQuantity = 0;
-    $formattedItems = [];
-    
-    foreach ($items as $item) {
-        $itemTotal = floatval($item['grand_total']);
-        $subtotal += $itemTotal;
-        $itemCount++;
-        $totalQuantity += intval($item['quantity']);
-        
-        $formattedItems[] = [
-            'id' => $item['id'],
-            'menu_item_id' => $item['menu_item_id'],
-            'name' => $item['item_name'],
-            'quantity' => intval($item['quantity']),
-            'price' => floatval($item['price']),
-            'total' => $itemTotal,
-            'add_ons_total' => floatval($item['add_ons_total'] ?? 0),
-            'formatted_price' => CURRENCY_SYMBOL . number_format($item['price'], 2),
-            'formatted_total' => CURRENCY_SYMBOL . number_format($itemTotal, 2),
-            'variant_data' => $item['variant_data'],
-            'add_ons' => $item['add_ons'],
-            'selected_options' => $item['selected_options'],
-            'notes' => $item['special_instructions'] ?? '',
-            'image_url' => $item['image_url'],
-            'merchant_id' => $item['merchant_id'],
-            'merchant_name' => $item['merchant_name']
-        ];
-    }
-    
-    $minimumMet = true;
-    $shortfall = 0;
-    if ($minimumOrder > 0 && $subtotal < $minimumOrder) {
-        $minimumMet = false;
-        $shortfall = $minimumOrder - $subtotal;
-    }
-    
-    $cartStmt = $conn->prepare("SELECT applied_discount FROM carts WHERE id = :cart_id");
-    $cartStmt->execute([':cart_id' => $cartId]);
-    $cartData = $cartStmt->fetch(PDO::FETCH_ASSOC);
-    $discount = floatval($cartData['applied_discount'] ?? 0);
-    
-    $totalAmount = ($subtotal + $deliveryFee) - $discount;
-    
-    return [
-        'merchant' => [
-            'id' => $merchantId,
-            'name' => $merchantName,
-            'delivery_fee' => round($deliveryFee, 2),
-            'delivery_fee_formatted' => CURRENCY_SYMBOL . number_format($deliveryFee, 2),
-            'minimum_order' => $minimumOrder,
-            'minimum_order_formatted' => CURRENCY_SYMBOL . number_format($minimumOrder, 2),
-            'minimum_met' => $minimumMet,
-            'shortfall' => round($shortfall, 2),
-            'shortfall_formatted' => CURRENCY_SYMBOL . number_format($shortfall, 2),
-            'preparation_time' => $prepTime . ' min'
-        ],
-        'items' => $formattedItems,
-        'subtotal' => round($subtotal, 2),
-        'subtotal_formatted' => CURRENCY_SYMBOL . number_format($subtotal, 2),
-        'discount' => round($discount, 2),
-        'discount_formatted' => CURRENCY_SYMBOL . number_format($discount, 2),
-        'delivery_fee' => round($deliveryFee, 2),
-        'delivery_fee_formatted' => CURRENCY_SYMBOL . number_format($deliveryFee, 2),
-        'delivery_breakdown' => $deliveryBreakdown,
-        'delivery_distance' => $deliveryDistance,
-        'delivery_branch' => $deliveryBranch,
-        'total_amount' => round($totalAmount, 2),
-        'total_amount_formatted' => CURRENCY_SYMBOL . number_format($totalAmount, 2),
-        'item_count' => $itemCount,
-        'total_quantity' => $totalQuantity,
-        'currency' => CURRENCY
-    ];
-}
-
-/*********************************
- * ADDRESS FUNCTIONS
- *********************************/
-function getUserDefaultAddress($conn, $userId) {
-    try {
-        $tableCheck = $conn->query("SHOW TABLES LIKE 'addresses'");
-        if ($tableCheck->rowCount() == 0) {
-            return null;
-        }
-        
-        $stmt = $conn->prepare("
-            SELECT id, label, address_line1, address_line2, city, neighborhood, 
-                   latitude, longitude, phone, recipient_name
-            FROM addresses 
-            WHERE user_id = :user_id AND is_default = 1 LIMIT 1
-        ");
-        $stmt->execute([':user_id' => $userId]);
-        $address = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($address) {
-            $address['latitude'] = $address['latitude'] ? floatval($address['latitude']) : null;
-            $address['longitude'] = $address['longitude'] ? floatval($address['longitude']) : null;
-        }
-        
-        return $address;
-    } catch (Exception $e) {
-        return null;
-    }
-}
-
-/*********************************
- * WALLET FUNCTIONS
- *********************************/
-function getWalletBalance($conn, $userId) {
-    try {
-        $tableCheck = $conn->query("SHOW TABLES LIKE 'dropx_wallets'");
-        if ($tableCheck->rowCount() == 0) {
-            return [
-                'exists' => false,
-                'balance' => 0,
-                'balance_formatted' => CURRENCY_SYMBOL . '0.00'
-            ];
-        }
-        
-        $stmt = $conn->prepare("
-            SELECT balance FROM dropx_wallets 
-            WHERE user_id = :user_id AND is_active = 1
-        ");
-        $stmt->execute([':user_id' => $userId]);
-        $wallet = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($wallet) {
-            return [
-                'exists' => true,
-                'balance' => floatval($wallet['balance']),
-                'balance_formatted' => CURRENCY_SYMBOL . number_format($wallet['balance'], 2)
-            ];
-        }
-        
-        return [
-            'exists' => false,
-            'balance' => 0,
-            'balance_formatted' => CURRENCY_SYMBOL . '0.00'
-        ];
-    } catch (Exception $e) {
-        return [
-            'exists' => false,
-            'balance' => 0,
-            'balance_formatted' => CURRENCY_SYMBOL . '0.00'
-        ];
-    }
-}
-
-function debitWallet($conn, $userId, $amount, $reference, $connInTransaction = false) {
-    $useConn = $connInTransaction ? $conn : $conn;
-    
-    try {
-        $stmt = $useConn->prepare("
-            UPDATE dropx_wallets 
-            SET balance = balance - :amount, 
-                updated_at = NOW() 
-            WHERE user_id = :user_id AND balance >= :amount AND is_active = 1
-        ");
-        $stmt->execute([
-            ':amount' => $amount,
-            ':user_id' => $userId
-        ]);
-        
-        if ($stmt->rowCount() === 0) {
-            return ['success' => false, 'message' => 'Insufficient wallet balance'];
-        }
-        
-        $tableCheck = $useConn->query("SHOW TABLES LIKE 'wallet_transactions'");
-        if ($tableCheck->rowCount() > 0) {
-            $logStmt = $useConn->prepare("
-                INSERT INTO wallet_transactions 
-                (user_id, amount, type, reference, status, created_at)
-                VALUES (:user_id, :amount, 'debit', :reference, 'completed', NOW())
-            ");
-            $logStmt->execute([
-                ':user_id' => $userId,
-                ':amount' => $amount,
-                ':reference' => $reference
-            ]);
-        }
-        
-        return ['success' => true];
-        
-    } catch (Exception $e) {
-        return ['success' => false, 'message' => $e->getMessage()];
-    }
-}
-
-/*********************************
- * ORDER CREATION
- *********************************/
-function createOrder($conn, $userId, $cartId, $totals, $address, $paymentMethod, $transactionId, $reference) {
-    $orderNumber = 'ORD-' . date('Ymd') . '-' . str_pad(mt_rand(1, 99999), 5, '0', STR_PAD_LEFT);
-    
-    try {
-        $conn->beginTransaction();
-        
-        $stmt = $conn->prepare("
-            INSERT INTO orders (
-                order_number, user_id, merchant_id, merchant_name,
-                subtotal, delivery_fee, discount_amount, total_amount,
-                delivery_address, delivery_address_id, payment_method, 
-                transaction_id, reference, payment_status, status, 
-                special_instructions, preparation_time, delivery_distance_km,
-                delivery_branch_name, delivery_branch_id, created_at, updated_at
-            ) VALUES (
-                :order_number, :user_id, :merchant_id, :merchant_name,
-                :subtotal, :delivery_fee, :discount, :total_amount,
-                :delivery_address, :delivery_address_id, :payment_method,
-                :transaction_id, :reference, :payment_status, :status,
-                :special_instructions, :preparation_time, :delivery_distance,
-                :delivery_branch, :delivery_branch_id, NOW(), NOW()
-            )
-        ");
-        
-        $deliveryAddress = $address 
-            ? trim($address['address_line1'] . ', ' . ($address['city'] ?? ''), ', ')
-            : 'Address not set';
-        
-        $specialInstructions = '';
-        foreach ($totals['items'] as $item) {
-            if (!empty($item['notes'])) {
-                $specialInstructions .= $item['name'] . ': ' . $item['notes'] . "\n";
-            }
-        }
-        
-        $stmt->execute([
-            ':order_number' => $orderNumber,
-            ':user_id' => $userId,
-            ':merchant_id' => $totals['merchant']['id'],
-            ':merchant_name' => $totals['merchant']['name'],
-            ':subtotal' => $totals['subtotal'],
-            ':delivery_fee' => $totals['delivery_fee'],
-            ':discount' => $totals['discount'],
-            ':total_amount' => $totals['total_amount'],
-            ':delivery_address' => $deliveryAddress,
-            ':delivery_address_id' => $address['id'] ?? null,
-            ':payment_method' => $paymentMethod,
-            ':transaction_id' => $transactionId,
-            ':reference' => $reference,
-            ':payment_status' => PAYMENT_STATUS_PAID,
-            ':status' => ORDER_STATUS_PAID,
-            ':special_instructions' => $specialInstructions ?: null,
-            ':preparation_time' => intval($totals['merchant']['preparation_time']),
-            ':delivery_distance' => $totals['delivery_distance'] ?? null,
-            ':delivery_branch' => isset($totals['delivery_branch']['branch_name']) ? $totals['delivery_branch']['branch_name'] : null,
-            ':delivery_branch_id' => isset($totals['delivery_branch']['id']) ? $totals['delivery_branch']['id'] : null
-        ]);
-        
-        $orderId = $conn->lastInsertId();
-        
-        $itemStmt = $conn->prepare("
-            INSERT INTO order_items (
-                order_id, item_name, quantity, price, total,
-                add_ons_total, special_instructions, variant_data, add_ons_json, selected_options, created_at
-            ) VALUES (
-                :order_id, :item_name, :quantity, :price, :total,
-                :add_ons_total, :special_instructions, :variant_data, :add_ons_json, :selected_options, NOW()
-            )
-        ");
-        
-        foreach ($totals['items'] as $item) {
-            $itemStmt->execute([
-                ':order_id' => $orderId,
-                ':item_name' => $item['name'],
-                ':quantity' => $item['quantity'],
-                ':price' => $item['price'],
-                ':total' => $item['total'],
-                ':add_ons_total' => $item['add_ons_total'] ?? 0,
-                ':special_instructions' => $item['notes'] ?? null,
-                ':variant_data' => isset($item['variant_data']) ? json_encode($item['variant_data']) : null,
-                ':add_ons_json' => !empty($item['add_ons']) ? json_encode($item['add_ons']) : null,
-                ':selected_options' => isset($item['selected_options']) ? json_encode($item['selected_options']) : null
-            ]);
-        }
-        
-        try {
-            $tableCheck = $conn->query("SHOW TABLES LIKE 'order_tracking'");
-            if ($tableCheck->rowCount() > 0) {
-                $trackStmt = $conn->prepare("
-                    INSERT INTO order_tracking (order_id, status, description, created_at)
-                    VALUES (:order_id, 'paid', 'Order placed and payment confirmed', NOW())
-                ");
-                $trackStmt->execute([':order_id' => $orderId]);
-            }
-        } catch (Exception $e) {
-            // Silent fail
-        }
-        
-        $clearStmt = $conn->prepare("
-            UPDATE cart_items SET is_active = 0, updated_at = NOW() 
-            WHERE cart_id = :cart_id
-        ");
-        $clearStmt->execute([':cart_id' => $cartId]);
-        
-        $updateCartStmt = $conn->prepare("
-            UPDATE carts SET status = 'completed', updated_at = NOW() 
-            WHERE id = :cart_id
-        ");
-        $updateCartStmt->execute([':cart_id' => $cartId]);
-        
-        $conn->commit();
-        
-        return [
-            'success' => true,
-            'order_id' => $orderId,
-            'order_number' => $orderNumber
-        ];
-        
-    } catch (Exception $e) {
-        $conn->rollBack();
-        return [
-            'success' => false,
-            'message' => $e->getMessage()
-        ];
-    }
+    return null;
 }
 
 /*********************************
@@ -686,115 +120,185 @@ try {
     if (!$input) {
         $input = $_POST;
     }
+    
+    $action = $input['action'] ?? $_GET['action'] ?? '';
+    $userId = checkAuthentication();
+    
+    if (!$userId) {
+        ob_clean();
+        ResponseHandler::error('Authentication required', 401, 'AUTH_REQUIRED');
+    }
+
+    $db = new Database();
+    $conn = $db->getConnection();
+    
+    if (!$conn) {
+        ResponseHandler::error('Database connection failed', 500);
+    }
 
     if ($method === 'GET') {
-        $cart = getActiveCart($conn, $userId);
+        if ($action === 'checkout_data') {
+            getCheckoutData($conn, $userId, $input);
+        } else {
+            getCheckoutData($conn, $userId, $input);
+        }
+    } elseif ($method === 'POST') {
+        if ($action === 'process_payment') {
+            processPayment($conn, $userId, $input);
+        } else {
+            processPayment($conn, $userId, $input);
+        }
+    } else {
+        ResponseHandler::error('Method not allowed', 405);
+    }
+
+} catch (Exception $e) {
+    ob_clean();
+    ResponseHandler::error('Server error: ' . $e->getMessage(), 500);
+}
+
+/*********************************
+ * GET CHECKOUT DATA
+ *********************************/
+function getCheckoutData($conn, $userId, $input) {
+    global $baseUrl;
+    
+    try {
+        // Get active cart
+        $cartStmt = $conn->prepare("
+            SELECT id FROM carts 
+            WHERE user_id = :user_id AND status = 'active'
+            ORDER BY created_at DESC LIMIT 1
+        ");
+        $cartStmt->execute([':user_id' => $userId]);
+        $cart = $cartStmt->fetch(PDO::FETCH_ASSOC);
+        
         if (!$cart) {
             ResponseHandler::error('No active cart found', 404);
-            exit();
+            return;
         }
         
-        $items = getCartItemsWithDetails($conn, $cart['id']);
+        // Get cart items
+        $itemsStmt = $conn->prepare("
+            SELECT 
+                ci.id,
+                ci.name,
+                ci.price,
+                ci.quantity,
+                ci.grand_total,
+                ci.merchant_id,
+                ci.merchant_name,
+                ci.image_url,
+                ci.special_instructions
+            FROM cart_items ci
+            WHERE ci.cart_id = :cart_id 
+            AND ci.is_active = 1 
+            AND ci.is_saved_for_later = 0
+        ");
+        $itemsStmt->execute([':cart_id' => $cart['id']]);
+        $items = $itemsStmt->fetchAll(PDO::FETCH_ASSOC);
+        
         if (empty($items)) {
             ResponseHandler::error('Cart is empty', 400);
-            exit();
+            return;
         }
         
-        $merchantIds = array_unique(array_column($items, 'merchant_id'));
-        if (count($merchantIds) > 1) {
-            ResponseHandler::error(
-                'Cart contains items from multiple merchants. Please checkout each merchant separately.',
-                400
-            );
-            exit();
+        // Get merchant info
+        $merchantId = $items[0]['merchant_id'];
+        $merchantName = $items[0]['merchant_name'];
+        
+        $merchantStmt = $conn->prepare("
+            SELECT min_order_amount, delivery_fee, is_open, is_active
+            FROM merchants WHERE id = :id
+        ");
+        $merchantStmt->execute([':id' => $merchantId]);
+        $merchant = $merchantStmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$merchant || !$merchant['is_open'] || !$merchant['is_active']) {
+            ResponseHandler::error("$merchantName is currently not available", 400);
+            return;
         }
         
-        $merchantId = $merchantIds[0];
-        $address = getUserDefaultAddress($conn, $userId);
-        
-        $promoCode = $_GET['promo_code'] ?? null;
-        $deliveryFeeResult = getDynamicDeliveryFee($conn, $merchantId, $address, $promoCode);
-        
-        if (!$deliveryFeeResult['success']) {
-            ResponseHandler::error($deliveryFeeResult['error'], 400);
-            exit();
+        // Calculate totals
+        $subtotal = 0;
+        foreach ($items as $item) {
+            $subtotal += floatval($item['grand_total']);
         }
         
-        if (!$deliveryFeeResult['within_range']) {
-            ResponseHandler::error(
-                'Delivery not available for this location. Maximum distance is ' . MAX_DELIVERY_DISTANCE . 'km.',
-                400
-            );
-            exit();
+        $deliveryFee = floatval($merchant['delivery_fee'] ?? DELIVERY_FEE_MINIMUM);
+        $minOrder = floatval($merchant['min_order_amount'] ?? 0);
+        $totalAmount = $subtotal + $deliveryFee;
+        
+        // Check minimum order
+        if ($subtotal < $minOrder) {
+            ResponseHandler::error("Minimum order amount is " . CURRENCY_SYMBOL . number_format($minOrder, 2), 400);
+            return;
         }
         
-        $totals = calculateCartTotals($conn, $cart['id'], $userId, $items, $deliveryFeeResult);
+        // Get user's default address
+        $addressStmt = $conn->prepare("
+            SELECT id, address_line1, city, phone, recipient_name
+            FROM addresses 
+            WHERE user_id = :user_id AND is_default = 1 LIMIT 1
+        ");
+        $addressStmt->execute([':user_id' => $userId]);
+        $address = $addressStmt->fetch(PDO::FETCH_ASSOC);
         
-        if (isset($totals['error'])) {
-            ResponseHandler::error($totals['error'], 400);
-            exit();
-        }
+        // Get wallet balance
+        $walletStmt = $conn->prepare("
+            SELECT balance FROM dropx_wallets 
+            WHERE user_id = :user_id AND is_active = 1
+        ");
+        $walletStmt->execute([':user_id' => $userId]);
+        $wallet = $walletStmt->fetch(PDO::FETCH_ASSOC);
         
-        if (!$totals['merchant']['minimum_met']) {
-            ResponseHandler::error('Minimum order requirement not met. Shortfall: ' . $totals['merchant']['shortfall_formatted'], 400);
-            exit();
-        }
-        
-        $wallet = getWalletBalance($conn, $userId);
-        
-        $deliveryAddress = null;
-        if ($address) {
-            $deliveryAddress = [
-                'id' => $address['id'],
-                'label' => $address['label'] ?? 'Home',
-                'address_line1' => $address['address_line1'],
-                'city' => $address['city'],
-                'neighborhood' => $address['neighborhood'] ?? '',
-                'phone' => $address['phone'] ?? '',
-                'latitude' => $address['latitude'],
-                'longitude' => $address['longitude']
-            ];
-        }
-        
-        $deliveryCalculation = [
-            'distance_km' => $deliveryFeeResult['distance'] ?? 0,
-            'base_fee' => $deliveryFeeResult['base_fee'] ?? DELIVERY_BASE_FEE,
-            'discount' => $deliveryFeeResult['discount'] ?? 0,
-            'breakdown' => $deliveryFeeResult['breakdown'] ?? [],
-            'within_range' => $deliveryFeeResult['within_range'] ?? true
-        ];
-        
-        if (isset($deliveryFeeResult['branch']) && $deliveryFeeResult['branch']) {
-            $deliveryCalculation['branch_used'] = [
-                'id' => $deliveryFeeResult['branch']['id'],
-                'branch_name' => $deliveryFeeResult['branch']['branch_name'],
-                'address' => $deliveryFeeResult['branch']['address'],
-                'distance_km' => $deliveryFeeResult['distance']
-            ];
-        }
-        
-        $responseData = [
-            'cart_id' => (string)$cart['id'],
-            'merchant' => $totals['merchant'],
-            'items' => $totals['items'],
+        $response = [
+            'cart_id' => $cart['id'],
+            'merchant' => [
+                'id' => $merchantId,
+                'name' => $merchantName,
+                'delivery_fee' => $deliveryFee,
+                'delivery_fee_formatted' => CURRENCY_SYMBOL . number_format($deliveryFee, 2),
+                'minimum_order' => $minOrder,
+                'minimum_order_formatted' => CURRENCY_SYMBOL . number_format($minOrder, 2),
+                'minimum_met' => $subtotal >= $minOrder,
+                'shortfall' => $subtotal < $minOrder ? $minOrder - $subtotal : 0,
+                'shortfall_formatted' => $subtotal < $minOrder ? CURRENCY_SYMBOL . number_format($minOrder - $subtotal, 2) : null
+            ],
+            'items' => array_map(function($item) {
+                return [
+                    'id' => $item['id'],
+                    'name' => $item['name'],
+                    'quantity' => intval($item['quantity']),
+                    'price' => floatval($item['price']),
+                    'total' => floatval($item['grand_total']),
+                    'notes' => $item['special_instructions']
+                ];
+            }, $items),
             'totals' => [
-                'subtotal' => $totals['subtotal'],
-                'subtotal_formatted' => $totals['subtotal_formatted'],
-                'discount' => $totals['discount'],
-                'discount_formatted' => $totals['discount_formatted'],
-                'delivery_fee' => $totals['delivery_fee'],
-                'delivery_fee_formatted' => $totals['delivery_fee_formatted'],
-                'total_amount' => $totals['total_amount'],
-                'total_amount_formatted' => $totals['total_amount_formatted'],
-                'item_count' => $totals['item_count'],
-                'total_quantity' => $totals['total_quantity'],
-                'currency' => CURRENCY
+                'subtotal' => $subtotal,
+                'subtotal_formatted' => CURRENCY_SYMBOL . number_format($subtotal, 2),
+                'delivery_fee' => $deliveryFee,
+                'delivery_fee_formatted' => CURRENCY_SYMBOL . number_format($deliveryFee, 2),
+                'total_amount' => $totalAmount,
+                'total_amount_formatted' => CURRENCY_SYMBOL . number_format($totalAmount, 2),
+                'item_count' => count($items),
+                'total_quantity' => array_sum(array_column($items, 'quantity'))
             ],
             'delivery' => [
-                'address' => $deliveryAddress,
-                'calculation' => $deliveryCalculation
+                'address' => $address ? [
+                    'id' => $address['id'],
+                    'address' => $address['address_line1'],
+                    'city' => $address['city'],
+                    'phone' => $address['phone'],
+                    'recipient' => $address['recipient_name']
+                ] : null
             ],
-            'wallet' => $wallet,
+            'wallet' => [
+                'exists' => $wallet !== false,
+                'balance' => $wallet ? floatval($wallet['balance']) : 0,
+                'balance_formatted' => CURRENCY_SYMBOL . number_format($wallet ? floatval($wallet['balance']) : 0, 2)
+            ],
             'payment_methods' => [
                 [
                     'id' => PAYMENT_METHOD_DROPX_WALLET,
@@ -802,7 +306,7 @@ try {
                     'type' => 'wallet',
                     'icon' => 'wallet',
                     'description' => 'Pay using your DropX Wallet balance',
-                    'is_enabled' => $wallet['exists'] && $wallet['balance'] >= $totals['total_amount']
+                    'is_enabled' => $wallet !== false && floatval($wallet['balance']) >= $totalAmount
                 ],
                 [
                     'id' => PAYMENT_METHOD_AIRTEL_MONEY,
@@ -843,145 +347,265 @@ try {
             ]
         ];
         
-        ResponseHandler::success($responseData, 'Checkout data retrieved successfully');
+        ResponseHandler::success($response, 'Checkout data retrieved successfully');
         
-    } elseif ($method === 'POST') {
+    } catch (Exception $e) {
+        ResponseHandler::error('Failed to get checkout data: ' . $e->getMessage(), 500);
+    }
+}
+
+/*********************************
+ * PROCESS PAYMENT AND CREATE ORDER
+ *********************************/
+function processPayment($conn, $userId, $input) {
+    try {
         $cartId = $input['cart_id'] ?? null;
         $paymentMethod = $input['payment_method'] ?? null;
         $transactionId = $input['transaction_id'] ?? null;
         $reference = $input['reference'] ?? null;
-        $promoCode = $input['promo_code'] ?? null;
         
         if (!$cartId) {
-            ResponseHandler::error('Cart ID required', 400);
-            exit();
-        }
-        if (!$paymentMethod) {
-            ResponseHandler::error('Payment method required', 400);
-            exit();
-        }
-        if (!$transactionId || !$reference) {
-            ResponseHandler::error('Transaction ID and reference required', 400);
-            exit();
+            ResponseHandler::error('Cart ID is required', 400);
+            return;
         }
         
+        if (!$paymentMethod) {
+            ResponseHandler::error('Payment method is required', 400);
+            return;
+        }
+        
+        if (!$transactionId || !$reference) {
+            ResponseHandler::error('Transaction ID and reference are required', 400);
+            return;
+        }
+        
+        // Verify cart belongs to user and get items
         $cartStmt = $conn->prepare("
             SELECT id FROM carts 
-            WHERE id = :id AND user_id = :user_id AND status = 'active'
+            WHERE id = :cart_id AND user_id = :user_id AND status = 'active'
         ");
-        $cartStmt->execute([':id' => $cartId, ':user_id' => $userId]);
+        $cartStmt->execute([
+            ':cart_id' => $cartId,
+            ':user_id' => $userId
+        ]);
         
         if (!$cartStmt->fetch()) {
             ResponseHandler::error('Cart not found or not active', 404);
-            exit();
+            return;
         }
         
-        $items = getCartItemsWithDetails($conn, $cartId);
-        if (empty($items)) {
+        // Get cart items
+        $itemsStmt = $conn->prepare("
+            SELECT 
+                ci.*,
+                m.name as merchant_name,
+                m.delivery_fee,
+                m.min_order_amount
+            FROM cart_items ci
+            LEFT JOIN merchants m ON ci.merchant_id = m.id
+            WHERE ci.cart_id = :cart_id 
+            AND ci.is_active = 1 
+            AND ci.is_saved_for_later = 0
+        ");
+        $itemsStmt->execute([':cart_id' => $cartId]);
+        $cartItems = $itemsStmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        if (empty($cartItems)) {
             ResponseHandler::error('Cart is empty', 400);
-            exit();
+            return;
         }
         
-        $address = getUserDefaultAddress($conn, $userId);
-        $merchantId = $items[0]['merchant_id'];
+        // Validate merchant
+        $merchantId = $cartItems[0]['merchant_id'];
+        $merchantName = $cartItems[0]['merchant_name'];
         
-        $deliveryFeeResult = getDynamicDeliveryFee($conn, $merchantId, $address, $promoCode);
+        $merchantStmt = $conn->prepare("
+            SELECT is_open, is_active FROM merchants WHERE id = :id
+        ");
+        $merchantStmt->execute([':id' => $merchantId]);
+        $merchant = $merchantStmt->fetch(PDO::FETCH_ASSOC);
         
-        if (!$deliveryFeeResult['success'] || !$deliveryFeeResult['within_range']) {
-            ResponseHandler::error($deliveryFeeResult['error'] ?? 'Delivery not available', 400);
-            exit();
+        if (!$merchant || !$merchant['is_open'] || !$merchant['is_active']) {
+            ResponseHandler::error("$merchantName is currently not available", 400);
+            return;
         }
         
-        $totals = calculateCartTotals($conn, $cartId, $userId, $items, $deliveryFeeResult);
-        
-        if (isset($totals['error'])) {
-            ResponseHandler::error($totals['error'], 400);
-            exit();
+        // Calculate totals
+        $subtotal = 0;
+        foreach ($cartItems as $item) {
+            $subtotal += floatval($item['grand_total']);
         }
         
-        if (!$totals['merchant']['minimum_met']) {
-            ResponseHandler::error('Minimum order requirement not met', 400);
-            exit();
+        $deliveryFee = floatval($cartItems[0]['delivery_fee'] ?? DELIVERY_FEE_MINIMUM);
+        $minOrder = floatval($cartItems[0]['min_order_amount'] ?? 0);
+        $totalAmount = $subtotal + $deliveryFee;
+        
+        // Check minimum order
+        if ($subtotal < $minOrder) {
+            ResponseHandler::error("Minimum order amount is " . CURRENCY_SYMBOL . number_format($minOrder, 2), 400);
+            return;
         }
         
+        // Process wallet payment if selected
         if ($paymentMethod === PAYMENT_METHOD_DROPX_WALLET) {
-            $walletDebit = debitWallet($conn, $userId, $totals['total_amount'], $reference);
-            if (!$walletDebit['success']) {
-                ResponseHandler::error($walletDebit['message'], 400);
-                exit();
-            }
-        }
-        
-        $order = createOrder(
-            $conn, $userId, $cartId, $totals, $address,
-            $paymentMethod, $transactionId, $reference
-        );
-        
-        if ($order['success']) {
-            ResponseHandler::success([
-                'order_id' => $order['order_id'],
-                'order_number' => $order['order_number'],
-                'amount' => $totals['total_amount'],
-                'amount_formatted' => $totals['total_amount_formatted'],
-                'merchant' => [
-                    'id' => $totals['merchant']['id'],
-                    'name' => $totals['merchant']['name']
-                ],
-                'delivery_fee' => $totals['delivery_fee'],
-                'delivery_fee_formatted' => $totals['delivery_fee_formatted'],
-                'status' => ORDER_STATUS_PAID,
-                'payment_status' => PAYMENT_STATUS_PAID
-            ], 'Order created successfully');
-        } else {
-            ResponseHandler::error('Failed to create order: ' . $order['message'], 500);
-        }
-        
-    } elseif ($method === 'PUT') {
-        $action = $input['action'] ?? '';
-        
-        if ($action === 'cancel_order') {
-            $orderId = $input['order_id'] ?? null;
-            
-            if (!$orderId) {
-                ResponseHandler::error('Order ID required', 400);
-                exit();
-            }
-            
-            $stmt = $conn->prepare("
-                SELECT status FROM orders 
-                WHERE id = :id AND user_id = :user_id
+            $walletStmt = $conn->prepare("
+                SELECT balance FROM dropx_wallets 
+                WHERE user_id = :user_id AND is_active = 1
             ");
-            $stmt->execute([':id' => $orderId, ':user_id' => $userId]);
-            $order = $stmt->fetch(PDO::FETCH_ASSOC);
+            $walletStmt->execute([':user_id' => $userId]);
+            $wallet = $walletStmt->fetch(PDO::FETCH_ASSOC);
             
-            if (!$order) {
-                ResponseHandler::error('Order not found', 404);
-                exit();
+            if (!$wallet || floatval($wallet['balance']) < $totalAmount) {
+                ResponseHandler::error('Insufficient wallet balance', 400);
+                return;
             }
             
-            if (!in_array($order['status'], [ORDER_STATUS_PENDING, ORDER_STATUS_PAID])) {
-                ResponseHandler::error('Order cannot be cancelled at this stage', 400);
-                exit();
-            }
-            
-            $updateStmt = $conn->prepare("
-                UPDATE orders 
-                SET status = 'cancelled', updated_at = NOW() 
-                WHERE id = :id
+            // Debit wallet
+            $debitStmt = $conn->prepare("
+                UPDATE dropx_wallets 
+                SET balance = balance - :amount, updated_at = NOW()
+                WHERE user_id = :user_id AND balance >= :amount
             ");
-            $updateStmt->execute([':id' => $orderId]);
+            $debitStmt->execute([
+                ':amount' => $totalAmount,
+                ':user_id' => $userId
+            ]);
             
-            ResponseHandler::success(['order_id' => $orderId], 'Order cancelled successfully');
-        } else {
-            ResponseHandler::error('Invalid action', 400);
+            // Record transaction
+            $transStmt = $conn->prepare("
+                INSERT INTO wallet_transactions 
+                (user_id, amount, type, reference, status, created_at)
+                VALUES (:user_id, :amount, 'debit', :reference, 'completed', NOW())
+            ");
+            $transStmt->execute([
+                ':user_id' => $userId,
+                ':amount' => $totalAmount,
+                ':reference' => $reference
+            ]);
         }
         
-    } else {
-        ResponseHandler::error('Method not allowed', 405);
+        // Generate order number
+        $orderNumber = 'ORD-' . date('Ymd') . '-' . str_pad(mt_rand(1, 99999), 5, '0', STR_PAD_LEFT);
+        
+        // Get delivery address
+        $addressStmt = $conn->prepare("
+            SELECT address_line1, city FROM addresses 
+            WHERE user_id = :user_id AND is_default = 1 LIMIT 1
+        ");
+        $addressStmt->execute([':user_id' => $userId]);
+        $address = $addressStmt->fetch(PDO::FETCH_ASSOC);
+        $deliveryAddress = $address ? $address['address_line1'] . ', ' . $address['city'] : 'Address not set';
+        
+        // Begin transaction for order creation
+        $conn->beginTransaction();
+        
+        // Create order
+        $orderSql = "INSERT INTO orders (
+            order_number, user_id, merchant_id, merchant_name,
+            subtotal, delivery_fee, total_amount,
+            payment_method, transaction_id, reference,
+            delivery_address, status, payment_status, created_at, updated_at
+        ) VALUES (
+            :order_number, :user_id, :merchant_id, :merchant_name,
+            :subtotal, :delivery_fee, :total_amount,
+            :payment_method, :transaction_id, :reference,
+            :delivery_address, :status, :payment_status, NOW(), NOW()
+        )";
+        
+        $orderStmt = $conn->prepare($orderSql);
+        $orderStmt->execute([
+            ':order_number' => $orderNumber,
+            ':user_id' => $userId,
+            ':merchant_id' => $merchantId,
+            ':merchant_name' => $merchantName,
+            ':subtotal' => $subtotal,
+            ':delivery_fee' => $deliveryFee,
+            ':total_amount' => $totalAmount,
+            ':payment_method' => $paymentMethod,
+            ':transaction_id' => $transactionId,
+            ':reference' => $reference,
+            ':delivery_address' => $deliveryAddress,
+            ':status' => ORDER_STATUS_PAID,
+            ':payment_status' => PAYMENT_STATUS_PAID
+        ]);
+        
+        $orderId = $conn->lastInsertId();
+        
+        // Create order items
+        $itemSql = "INSERT INTO order_items (
+            order_id, item_name, quantity, price, total,
+            add_ons_total, special_instructions, created_at
+        ) VALUES (
+            :order_id, :item_name, :quantity, :price, :total,
+            :add_ons_total, :instructions, NOW()
+        )";
+        
+        $itemStmt = $conn->prepare($itemSql);
+        
+        foreach ($cartItems as $item) {
+            $addOnsTotal = floatval($item['add_ons_total'] ?? 0);
+            $itemStmt->execute([
+                ':order_id' => $orderId,
+                ':item_name' => $item['name'],
+                ':quantity' => intval($item['quantity']),
+                ':price' => floatval($item['price']),
+                ':total' => floatval($item['grand_total']),
+                ':add_ons_total' => $addOnsTotal,
+                ':instructions' => $item['special_instructions'] ?? ''
+            ]);
+        }
+        
+        // Add to order status history
+        $historySql = "INSERT INTO order_status_history (
+            order_id, old_status, new_status, changed_by, changed_by_id, created_at
+        ) VALUES (
+            :order_id, :old_status, :new_status, :changed_by, :changed_by_id, NOW()
+        )";
+        
+        $historyStmt = $conn->prepare($historySql);
+        $historyStmt->execute([
+            ':order_id' => $orderId,
+            ':old_status' => '',
+            ':new_status' => ORDER_STATUS_PAID,
+            ':changed_by' => 'user',
+            ':changed_by_id' => $userId
+        ]);
+        
+        // Clear cart
+        $clearStmt = $conn->prepare("
+            UPDATE cart_items SET is_active = 0, updated_at = NOW()
+            WHERE cart_id = :cart_id
+        ");
+        $clearStmt->execute([':cart_id' => $cartId]);
+        
+        $updateCartStmt = $conn->prepare("
+            UPDATE carts SET status = 'completed', updated_at = NOW()
+            WHERE id = :cart_id
+        ");
+        $updateCartStmt->execute([':cart_id' => $cartId]);
+        
+        $conn->commit();
+        
+        ResponseHandler::success([
+            'order_id' => $orderId,
+            'order_number' => $orderNumber,
+            'amount' => $totalAmount,
+            'amount_formatted' => CURRENCY_SYMBOL . number_format($totalAmount, 2),
+            'merchant' => [
+                'id' => $merchantId,
+                'name' => $merchantName
+            ],
+            'delivery_fee' => $deliveryFee,
+            'delivery_fee_formatted' => CURRENCY_SYMBOL . number_format($deliveryFee, 2),
+            'status' => ORDER_STATUS_PAID,
+            'payment_status' => PAYMENT_STATUS_PAID
+        ], 'Order created successfully');
+        
+    } catch (Exception $e) {
+        if ($conn->inTransaction()) {
+            $conn->rollBack();
+        }
+        ResponseHandler::error('Failed to process payment: ' . $e->getMessage(), 500);
     }
-
-} catch (Exception $e) {
-    ob_clean();
-    ResponseHandler::error('Server error occurred', 500);
 }
 ?>
