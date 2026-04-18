@@ -1,7 +1,8 @@
 <?php
 /*********************************
  * CHECKOUT API - ORDER PROCESSING
- * PURE API ENDPOINT - NO HTML
+ * WITH MAP-BASED DELIVERY FEE CALCULATION
+ * FEES COME FROM DATABASE
  *********************************/
 
 ob_start();
@@ -72,6 +73,7 @@ function checkAuthentication() {
  *********************************/
 try {
     $method = $_SERVER['REQUEST_METHOD'];
+    $requestUri = $_SERVER['REQUEST_URI'];
     $input = json_decode(file_get_contents('php://input'), true);
     if (!$input) {
         $input = $_POST;
@@ -79,9 +81,16 @@ try {
     
     $userId = checkAuthentication();
     
+    // Check if this is a delivery fee calculation request
+    if ($method === 'POST' && strpos($requestUri, 'calculate-fee') !== false) {
+        handleCalculateDeliveryFee($input);
+        exit();
+    }
+    
     // Allow GET requests without auth for checkout page load (will return empty cart)
     if ($method === 'GET' && !$userId) {
         ob_clean();
+        $defaultDeliveryFee = getBaseDeliveryFee();
         ResponseHandler::success([
             'authenticated' => false,
             'cart' => [
@@ -92,8 +101,19 @@ try {
                     'total_quantity' => 0
                 ]
             ],
-            'delivery_locations' => [],
-            'default_delivery_fee' => 0,
+            'delivery' => [
+                'instructions' => '',
+                'delivery_fee' => $defaultDeliveryFee
+            ],
+            'customer' => [
+                'phone_number' => null,
+                'default_phone' => '+265'
+            ],
+            'order_summary' => [
+                'subtotal' => 0,
+                'delivery_fee' => $defaultDeliveryFee,
+                'total' => $defaultDeliveryFee
+            ],
             'minimum_order_amount' => 0
         ]);
         exit();
@@ -138,20 +158,14 @@ function handleGetCheckout($userId) {
             $totalQuantity += $item['quantity'];
         }
         
-        // Get saved delivery location
-        $savedLocation = getUserDeliveryLocation($conn, $userId);
-        
         // Get saved delivery instructions
         $savedInstructions = getUserDeliveryInstructions($conn, $userId);
         
         // Get user phone number
         $userPhone = getUserPhoneNumber($conn, $userId);
         
-        // Calculate delivery fee
-        $deliveryFee = calculateDeliveryFee($conn, $savedLocation);
-        
-        // Get available delivery locations from database
-        $deliveryLocations = getDeliveryLocations($conn);
+        // Get base delivery fee from database
+        $baseDeliveryFee = getBaseDeliveryFee();
         
         ResponseHandler::success([
             'authenticated' => true,
@@ -166,10 +180,8 @@ function handleGetCheckout($userId) {
                 ]
             ],
             'delivery' => [
-                'selected_location' => $savedLocation,
-                'delivery_fee' => $deliveryFee,
-                'available_locations' => $deliveryLocations,
-                'instructions' => $savedInstructions
+                'instructions' => $savedInstructions,
+                'delivery_fee' => $baseDeliveryFee
             ],
             'customer' => [
                 'phone_number' => $userPhone,
@@ -177,14 +189,70 @@ function handleGetCheckout($userId) {
             ],
             'order_summary' => [
                 'subtotal' => round($subtotal, 2),
-                'delivery_fee' => $deliveryFee,
-                'total' => round($subtotal + $deliveryFee, 2)
+                'delivery_fee' => $baseDeliveryFee,
+                'total' => round($subtotal + $baseDeliveryFee, 2)
             ],
             'minimum_order_amount' => getMinimumOrderAmount($conn)
         ]);
         
     } catch (Exception $e) {
         ResponseHandler::error('Error loading checkout: ' . $e->getMessage(), 500);
+    }
+}
+
+/*********************************
+ * CALCULATE DELIVERY FEE BASED ON MAP COORDINATES
+ *********************************/
+function handleCalculateDeliveryFee($data) {
+    $db = new Database();
+    $conn = $db->getConnection();
+    
+    try {
+        // Validate required fields
+        $latitude = $data['latitude'] ?? null;
+        $longitude = $data['longitude'] ?? null;
+        $merchantId = $data['merchant_id'] ?? null;
+        
+        if (!$latitude || !$longitude) {
+            ResponseHandler::error('Latitude and longitude are required', 400);
+        }
+        
+        if (!$merchantId) {
+            ResponseHandler::error('Merchant ID is required', 400);
+        }
+        
+        // Get merchant location from database
+        $merchant = getMerchantLocation($conn, $merchantId);
+        
+        if (!$merchant) {
+            ResponseHandler::error('Merchant not found', 404);
+        }
+        
+        // Calculate distance using Haversine formula
+        $distance = calculateDistance(
+            $merchant['latitude'], $merchant['longitude'],
+            $latitude, $longitude
+        );
+        
+        // Get delivery fee from database based on distance
+        $deliveryFee = getDeliveryFeeByDistance($conn, $distance);
+        
+        // Calculate estimated delivery time
+        $estimatedTime = estimateDeliveryTime($distance);
+        
+        ResponseHandler::success([
+            'distance_km' => round($distance, 2),
+            'delivery_fee' => $deliveryFee,
+            'estimated_time' => $estimatedTime,
+            'merchant_location' => [
+                'latitude' => $merchant['latitude'],
+                'longitude' => $merchant['longitude'],
+                'address' => $merchant['address']
+            ]
+        ]);
+        
+    } catch (Exception $e) {
+        ResponseHandler::error('Failed to calculate delivery fee: ' . $e->getMessage(), 500);
     }
 }
 
@@ -200,17 +268,28 @@ function handlePostCheckout($data, $userId) {
         $conn->beginTransaction();
         
         // Validate required fields
-        $deliveryLocation = $data['delivery_location'] ?? null;
+        $addressData = $data['address'] ?? null;
         $phoneNumber = $data['phone_number'] ?? null;
         $instructions = $data['instructions'] ?? '';
         $paymentMethod = $data['payment_method'] ?? 'cash_on_delivery';
         
-        if (!$deliveryLocation) {
-            ResponseHandler::error('Delivery location is required', 400);
+        if (!$addressData) {
+            ResponseHandler::error('Delivery address is required', 400);
         }
         
         if (!$phoneNumber) {
             ResponseHandler::error('Phone number is required', 400);
+        }
+        
+        // Extract address details
+        $latitude = $addressData['latitude'] ?? null;
+        $longitude = $addressData['longitude'] ?? null;
+        $formattedAddress = $addressData['formatted_address'] ?? '';
+        $placeId = $addressData['place_id'] ?? null;
+        $addressLabel = $addressData['label'] ?? 'Home';
+        
+        if (!$latitude || !$longitude) {
+            ResponseHandler::error('Valid location coordinates are required', 400);
         }
         
         // Get cart
@@ -221,13 +300,31 @@ function handlePostCheckout($data, $userId) {
             ResponseHandler::error('Cart is empty', 400);
         }
         
+        // Get merchant ID from first cart item
+        $merchantId = $cartItems[0]['merchant_id'] ?? null;
+        if (!$merchantId) {
+            ResponseHandler::error('Merchant information not found', 400);
+        }
+        
+        // Get merchant location and calculate delivery fee
+        $merchant = getMerchantLocation($conn, $merchantId);
+        $distance = 0;
+        $deliveryFee = getBaseDeliveryFee(); // Default fallback
+        
+        if ($merchant && isset($merchant['latitude']) && isset($merchant['longitude'])) {
+            $distance = calculateDistance(
+                $merchant['latitude'], $merchant['longitude'],
+                $latitude, $longitude
+            );
+            $deliveryFee = getDeliveryFeeByDistance($conn, $distance);
+        }
+        
         // Calculate totals
         $subtotal = 0;
         foreach ($cartItems as $item) {
             $subtotal += $item['grand_total'];
         }
         
-        $deliveryFee = calculateDeliveryFee($conn, $deliveryLocation);
         $totalAmount = $subtotal + $deliveryFee;
         
         // Check minimum order amount if applicable
@@ -236,15 +333,25 @@ function handlePostCheckout($data, $userId) {
             ResponseHandler::error("Minimum order amount is MWK " . number_format($minimumOrder, 2), 400);
         }
         
+        // Save address to database
+        $addressId = saveDeliveryAddress($conn, $userId, [
+            'latitude' => $latitude,
+            'longitude' => $longitude,
+            'formatted_address' => $formattedAddress,
+            'place_id' => $placeId,
+            'label' => $addressLabel
+        ]);
+        
         // Create order
         $orderId = createOrder($conn, $userId, $cart, [
             'subtotal' => $subtotal,
             'delivery_fee' => $deliveryFee,
             'total_amount' => $totalAmount,
-            'delivery_location' => $deliveryLocation,
+            'address_id' => $addressId,
             'instructions' => $instructions,
             'phone_number' => $phoneNumber,
-            'payment_method' => $paymentMethod
+            'payment_method' => $paymentMethod,
+            'distance_km' => $distance
         ]);
         
         // Create order items
@@ -254,7 +361,7 @@ function handlePostCheckout($data, $userId) {
         clearCartAfterOrder($conn, $cart['id']);
         
         // Save delivery info for future use
-        saveUserDeliveryInfo($conn, $userId, $deliveryLocation, $instructions, $phoneNumber);
+        saveUserDeliveryInfo($conn, $userId, $instructions, $phoneNumber);
         
         // Update user's phone number in users table
         updateUserPhone($conn, $userId, $phoneNumber);
@@ -267,7 +374,9 @@ function handlePostCheckout($data, $userId) {
             'order_id' => $orderId,
             'order_number' => generateOrderNumber($orderId),
             'total_amount' => $totalAmount,
-            'estimated_delivery_time' => getEstimatedDeliveryTime(),
+            'delivery_fee' => $deliveryFee,
+            'distance_km' => round($distance, 2),
+            'estimated_delivery_time' => estimateDeliveryTime($distance),
             'status' => 'pending'
         ]);
         
@@ -278,8 +387,175 @@ function handlePostCheckout($data, $userId) {
 }
 
 /*********************************
+ * DISTANCE AND FEE CALCULATION FUNCTIONS
+ *********************************/
+
+/**
+ * Calculate distance between two coordinates using Haversine formula
+ */
+function calculateDistance($lat1, $lon1, $lat2, $lon2) {
+    $earthRadius = 6371; // kilometers
+    
+    $latDelta = deg2rad($lat2 - $lat1);
+    $lonDelta = deg2rad($lon2 - $lon1);
+    
+    $a = sin($latDelta / 2) * sin($latDelta / 2) +
+         cos(deg2rad($lat1)) * cos(deg2rad($lat2)) *
+         sin($lonDelta / 2) * sin($lonDelta / 2);
+    
+    $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
+    
+    return $earthRadius * $c;
+}
+
+/**
+ * Get delivery fee based on distance from database
+ */
+function getDeliveryFeeByDistance($conn, $distance) {
+    try {
+        $stmt = $conn->prepare(
+            "SELECT fee FROM delivery_fee_rules 
+             WHERE min_distance <= :distance 
+             AND max_distance >= :distance 
+             AND is_active = 1 
+             LIMIT 1"
+        );
+        $stmt->execute([':distance' => $distance]);
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($result) {
+            return (float)$result['fee'];
+        }
+        
+        // If no rule found, get the highest tier
+        $stmt = $conn->prepare(
+            "SELECT fee FROM delivery_fee_rules 
+             WHERE is_active = 1 
+             ORDER BY max_distance DESC 
+             LIMIT 1"
+        );
+        $stmt->execute();
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($result) {
+            return (float)$result['fee'];
+        }
+    } catch (Exception $e) {
+        // Fall back to default
+    }
+    
+    // Default fallback
+    return 1500;
+}
+
+/**
+ * Get base delivery fee (minimum fee)
+ */
+function getBaseDeliveryFee() {
+    $db = new Database();
+    $conn = $db->getConnection();
+    
+    try {
+        $stmt = $conn->prepare(
+            "SELECT fee FROM delivery_fee_rules 
+             WHERE is_active = 1 
+             ORDER BY min_distance ASC 
+             LIMIT 1"
+        );
+        $stmt->execute();
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($result) {
+            return (float)$result['fee'];
+        }
+    } catch (Exception $e) {
+        // Fall back to default
+    }
+    
+    return 1500;
+}
+
+/**
+ * Get all delivery fee rules (for admin display)
+ */
+function getAllDeliveryFeeRules($conn) {
+    $stmt = $conn->prepare(
+        "SELECT id, min_distance, max_distance, fee, is_active 
+         FROM delivery_fee_rules 
+         WHERE is_active = 1 
+         ORDER BY min_distance ASC"
+    );
+    $stmt->execute();
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+/**
+ * Estimate delivery time based on distance
+ */
+function estimateDeliveryTime($distance) {
+    // Base preparation time: 15 minutes
+    $baseTime = 15;
+    
+    // Travel time: assume 30 km/h average speed
+    $travelTimeMinutes = ($distance / 30) * 60;
+    
+    $totalMinutes = round($baseTime + $travelTimeMinutes);
+    
+    // Format as minutes or hours
+    if ($totalMinutes < 60) {
+        return "$totalMinutes minutes";
+    } else {
+        $hours = floor($totalMinutes / 60);
+        $minutes = $totalMinutes % 60;
+        if ($minutes > 0) {
+            return "$hours hour " . ($minutes > 0 ? "$minutes minutes" : "");
+        }
+        return "$hours hour" . ($hours > 1 ? "s" : "");
+    }
+}
+
+/*********************************
  * DATABASE HELPER FUNCTIONS
  *********************************/
+
+/**
+ * Get merchant location from database
+ */
+function getMerchantLocation($conn, $merchantId) {
+    $stmt = $conn->prepare(
+        "SELECT id, name, latitude, longitude, address, delivery_radius_km 
+         FROM merchants 
+         WHERE id = :merchant_id AND is_active = 1"
+    );
+    $stmt->execute([':merchant_id' => $merchantId]);
+    return $stmt->fetch(PDO::FETCH_ASSOC);
+}
+
+/**
+ * Save delivery address to database
+ */
+function saveDeliveryAddress($conn, $userId, $addressData) {
+    $stmt = $conn->prepare(
+        "INSERT INTO user_addresses (
+            user_id, latitude, longitude, formatted_address, 
+            place_id, label, created_at, updated_at
+        ) VALUES (
+            :user_id, :latitude, :longitude, :formatted_address,
+            :place_id, :label, NOW(), NOW()
+        )"
+    );
+    
+    $stmt->execute([
+        ':user_id' => $userId,
+        ':latitude' => $addressData['latitude'],
+        ':longitude' => $addressData['longitude'],
+        ':formatted_address' => $addressData['formatted_address'],
+        ':place_id' => $addressData['place_id'],
+        ':label' => $addressData['label']
+    ]);
+    
+    return $conn->lastInsertId();
+}
 
 /**
  * Get user's active cart
@@ -388,21 +664,6 @@ function getCartItemAddOns($conn, $cartItemId) {
 }
 
 /**
- * Get user's saved delivery location
- */
-function getUserDeliveryLocation($conn, $userId) {
-    $stmt = $conn->prepare(
-        "SELECT delivery_location FROM user_delivery_info 
-         WHERE user_id = :user_id 
-         LIMIT 1"
-    );
-    $stmt->execute([':user_id' => $userId]);
-    $result = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    return $result ? $result['delivery_location'] : null;
-}
-
-/**
  * Get user's saved delivery instructions
  */
 function getUserDeliveryInstructions($conn, $userId) {
@@ -444,55 +705,6 @@ function updateUserPhone($conn, $userId, $phoneNumber) {
 }
 
 /**
- * Calculate delivery fee based on location
- */
-function calculateDeliveryFee($conn, $location) {
-    $defaultFee = 0;
-    
-    if (!$location) {
-        return $defaultFee;
-    }
-    
-    $stmt = $conn->prepare(
-        "SELECT base_delivery_fee FROM delivery_zones 
-         WHERE zone_name = :location AND is_active = 1
-         LIMIT 1"
-    );
-    $stmt->execute([':location' => $location]);
-    $result = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    return $result ? floatval($result['base_delivery_fee']) : $defaultFee;
-}
-
-/**
- * Get available delivery locations from database
- */
-function getDeliveryLocations($conn) {
-    $stmt = $conn->prepare(
-        "SELECT id, zone_name as name, base_delivery_fee as fee 
-         FROM delivery_zones 
-         WHERE is_active = 1 
-         ORDER BY base_delivery_fee ASC, zone_name ASC"
-    );
-    $stmt->execute();
-    $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-    if (empty($results)) {
-        // Fallback hardcoded values if no data in database
-        return [
-            ['id' => 1, 'name' => 'Den', 'fee' => 0],
-            ['id' => 2, 'name' => 'The Cake Fairy Mw', 'fee' => 0],
-            ['id' => 3, 'name' => 'Chiuzim Church (Area)', 'fee' => 0],
-            ['id' => 4, 'name' => 'City Centre', 'fee' => 1500],
-            ['id' => 5, 'name' => 'Area 49', 'fee' => 2000],
-            ['id' => 6, 'name' => 'Ginnery Corner', 'fee' => 2500]
-        ];
-    }
-    
-    return $results;
-}
-
-/**
  * Get minimum order amount
  */
 function getMinimumOrderAmount($conn) {
@@ -508,13 +720,6 @@ function getMinimumOrderAmount($conn) {
 }
 
 /**
- * Get estimated delivery time
- */
-function getEstimatedDeliveryTime() {
-    return "30-45 minutes";
-}
-
-/**
  * Create order
  */
 function createOrder($conn, $userId, $cart, $orderData) {
@@ -524,14 +729,14 @@ function createOrder($conn, $userId, $cart, $orderData) {
         "INSERT INTO orders (
             user_id, cart_id, order_number, 
             subtotal, delivery_fee, total_amount,
-            delivery_address, special_instructions,
-            payment_method, status,
+            delivery_address_id, special_instructions,
+            payment_method, status, distance_km,
             created_at, updated_at
         ) VALUES (
             :user_id, :cart_id, :order_number,
             :subtotal, :delivery_fee, :total_amount,
-            :delivery_location, :instructions,
-            :payment_method, 'pending',
+            :address_id, :instructions,
+            :payment_method, 'pending', :distance_km,
             NOW(), NOW()
         )"
     );
@@ -543,9 +748,10 @@ function createOrder($conn, $userId, $cart, $orderData) {
         ':subtotal' => $orderData['subtotal'],
         ':delivery_fee' => $orderData['delivery_fee'],
         ':total_amount' => $orderData['total_amount'],
-        ':delivery_location' => $orderData['delivery_location'],
+        ':address_id' => $orderData['address_id'],
         ':instructions' => $orderData['instructions'],
-        ':payment_method' => $orderData['payment_method']
+        ':payment_method' => $orderData['payment_method'],
+        ':distance_km' => $orderData['distance_km']
     ]);
     
     return $conn->lastInsertId();
@@ -625,7 +831,7 @@ function clearCartAfterOrder($conn, $cartId) {
 /**
  * Save user delivery info for future use
  */
-function saveUserDeliveryInfo($conn, $userId, $location, $instructions, $phoneNumber) {
+function saveUserDeliveryInfo($conn, $userId, $instructions, $phoneNumber) {
     // Check if exists
     $checkStmt = $conn->prepare(
         "SELECT id FROM user_delivery_info WHERE user_id = :user_id"
@@ -636,8 +842,7 @@ function saveUserDeliveryInfo($conn, $userId, $location, $instructions, $phoneNu
     if ($existing) {
         $stmt = $conn->prepare(
             "UPDATE user_delivery_info 
-             SET delivery_location = :location, 
-                 instructions = :instructions, 
+             SET instructions = :instructions, 
                  phone_number = :phone_number,
                  updated_at = NOW()
              WHERE user_id = :user_id"
@@ -645,16 +850,15 @@ function saveUserDeliveryInfo($conn, $userId, $location, $instructions, $phoneNu
     } else {
         $stmt = $conn->prepare(
             "INSERT INTO user_delivery_info (
-                user_id, delivery_location, instructions, phone_number, created_at, updated_at
+                user_id, instructions, phone_number, created_at, updated_at
             ) VALUES (
-                :user_id, :location, :instructions, :phone_number, NOW(), NOW()
+                :user_id, :instructions, :phone_number, NOW(), NOW()
             )"
         );
     }
     
     $stmt->execute([
         ':user_id' => $userId,
-        ':location' => $location,
         ':instructions' => $instructions,
         ':phone_number' => $phoneNumber
     ]);
