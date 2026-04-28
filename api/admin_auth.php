@@ -1,6 +1,22 @@
 <?php
 // backend/api/admin_auth.php
-// Updated version without username field
+// =============================================
+// ADMIN API - LOGIN, REGISTER, LOGOUT, ME
+// With CORS support for Vercel frontend
+// =============================================
+
+// CORS Headers - Allow Vercel frontend
+header("Access-Control-Allow-Origin: https://frontend-pink-pi-70.vercel.app");
+header("Access-Control-Allow-Credentials: true");
+header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With");
+header("Content-Type: application/json; charset=UTF-8");
+
+// Handle preflight OPTIONS request
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
 
 require_once __DIR__ . '/../config/admin_database.php';
 require_once __DIR__ . '/../includes/admin_auth.php';
@@ -10,14 +26,9 @@ $auth = new AdminAuth();
 $method = $_SERVER['REQUEST_METHOD'];
 $action = isset($_GET['action']) ? $_GET['action'] : '';
 
-// Handle CORS
-if ($method === 'OPTIONS') {
-    http_response_code(200);
-    exit();
-}
-
 // =============================================
 // 1. LOGIN - With Email OR Phone
+// POST: admin_auth.php?action=login
 // =============================================
 if ($method === 'POST' && $action === 'login') {
     $data = json_decode(file_get_contents('php://input'), true);
@@ -40,7 +51,7 @@ if ($method === 'POST' && $action === 'login') {
 }
 
 // =============================================
-// 2. REGISTER - Only Super Admin (PROTECTED)
+// 2. REGISTER - Only Super Admin
 // =============================================
 elseif ($method === 'POST' && $action === 'register') {
     $currentAdmin = $auth->validateToken();
@@ -55,7 +66,6 @@ elseif ($method === 'POST' && $action === 'register') {
     
     $data = json_decode(file_get_contents('php://input'), true);
     
-    // Validate required fields (no username)
     $required = ['email', 'phone', 'full_name', 'password', 'role'];
     foreach ($required as $field) {
         if (empty($data[$field])) {
@@ -63,22 +73,18 @@ elseif ($method === 'POST' && $action === 'register') {
         }
     }
     
-    // Validate email
     if (!filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
         $db->sendError('Invalid email format', 400);
     }
     
-    // Validate phone
     if (!preg_match('/^[\+]?[0-9\s\-\(\)]{10,}$/', $data['phone'])) {
         $db->sendError('Invalid phone number format', 400);
     }
     
-    // Validate password
     if (strlen($data['password']) < 6) {
         $db->sendError('Password must be at least 6 characters', 400);
     }
     
-    // Validate role
     $allowedRoles = ['operations_admin', 'finance_admin', 'support_admin', 'technical_admin'];
     
     if ($data['role'] === 'super_admin') {
