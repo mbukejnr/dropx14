@@ -1,8 +1,6 @@
 <?php
 // backend/api/admin_auth.php
-// =============================================
-// ADMIN API - LOGIN, REGISTER, LOGOUT, ME
-// =============================================
+// Updated version without username field
 
 require_once __DIR__ . '/../config/admin_database.php';
 require_once __DIR__ . '/../includes/admin_auth.php';
@@ -19,21 +17,20 @@ if ($method === 'OPTIONS') {
 }
 
 // =============================================
-// 1. LOGIN - Any admin (PUBLIC)
-// POST: admin_auth.php?action=login
+// 1. LOGIN - With Email OR Phone
 // =============================================
 if ($method === 'POST' && $action === 'login') {
     $data = json_decode(file_get_contents('php://input'), true);
     
-    if (empty($data['email'])) {
-        $db->sendError('Email is required', 400);
+    if (empty($data['identifier'])) {
+        $db->sendError('Email or phone number is required', 400);
     }
     
     if (empty($data['password'])) {
         $db->sendError('Password is required', 400);
     }
     
-    $result = $auth->login($data['email'], $data['password'], $data['remember_me'] ?? false);
+    $result = $auth->login($data['identifier'], $data['password'], $data['remember_me'] ?? false);
     
     if ($result['success']) {
         $db->sendResponse($result['data']);
@@ -44,26 +41,22 @@ if ($method === 'POST' && $action === 'login') {
 
 // =============================================
 // 2. REGISTER - Only Super Admin (PROTECTED)
-// POST: admin_auth.php?action=register
-// Headers: Authorization: Bearer {token}
 // =============================================
 elseif ($method === 'POST' && $action === 'register') {
-    // Validate token first
     $currentAdmin = $auth->validateToken();
     
     if (!$currentAdmin) {
-        exit(); // validateToken already sent error response
+        exit();
     }
     
-    // Check if Super Admin
     if ($currentAdmin['role'] !== 'super_admin') {
         $db->sendForbidden('Only Super Admin can create new admin accounts');
     }
     
     $data = json_decode(file_get_contents('php://input'), true);
     
-    // Validate required fields
-    $required = ['username', 'email', 'full_name', 'password', 'role'];
+    // Validate required fields (no username)
+    $required = ['email', 'phone', 'full_name', 'password', 'role'];
     foreach ($required as $field) {
         if (empty($data[$field])) {
             $db->sendError("Field '{$field}' is required", 400);
@@ -75,6 +68,11 @@ elseif ($method === 'POST' && $action === 'register') {
         $db->sendError('Invalid email format', 400);
     }
     
+    // Validate phone
+    if (!preg_match('/^[\+]?[0-9\s\-\(\)]{10,}$/', $data['phone'])) {
+        $db->sendError('Invalid phone number format', 400);
+    }
+    
     // Validate password
     if (strlen($data['password']) < 6) {
         $db->sendError('Password must be at least 6 characters', 400);
@@ -83,7 +81,6 @@ elseif ($method === 'POST' && $action === 'register') {
     // Validate role
     $allowedRoles = ['operations_admin', 'finance_admin', 'support_admin', 'technical_admin'];
     
-    // Allow super_admin only if none exists
     if ($data['role'] === 'super_admin') {
         $stmt = $db->getConnection()->prepare("SELECT COUNT(*) FROM admin_users WHERE role = 'super_admin'");
         $stmt->execute();
@@ -98,7 +95,6 @@ elseif ($method === 'POST' && $action === 'register') {
         $db->sendError('Invalid role. Allowed: ' . implode(', ', $allowedRoles), 400);
     }
     
-    // Register new admin
     $result = $auth->register($data, $currentAdmin['id'], $currentAdmin['role']);
     
     if ($result['success']) {
@@ -109,8 +105,7 @@ elseif ($method === 'POST' && $action === 'register') {
 }
 
 // =============================================
-// 3. LOGOUT - Any admin (PROTECTED)
-// POST: admin_auth.php?action=logout
+// 3. LOGOUT
 // =============================================
 elseif ($method === 'POST' && $action === 'logout') {
     $headers = getallheaders();
@@ -128,23 +123,20 @@ elseif ($method === 'POST' && $action === 'logout') {
 }
 
 // =============================================
-// 4. GET CURRENT ADMIN (PROTECTED)
-// GET: admin_auth.php?action=me
+// 4. GET CURRENT ADMIN
 // =============================================
 elseif ($method === 'GET' && $action === 'me') {
     $admin = $auth->validateToken();
     
     if ($admin) {
-        // Get complete admin details
         $stmt = $db->getConnection()->prepare("
-            SELECT id, username, email, phone, full_name, role, is_active, last_login, created_at
+            SELECT id, email, phone, full_name, role, is_active, last_login, created_at
             FROM admin_users 
             WHERE id = :id
         ");
         $stmt->execute([':id' => $admin['id']]);
         $adminDetails = $stmt->fetch();
         
-        // Get permissions
         $permissions = $auth->getPermissions($admin['role']);
         $adminDetails['permissions'] = $permissions;
         
@@ -153,8 +145,7 @@ elseif ($method === 'GET' && $action === 'me') {
 }
 
 // =============================================
-// 5. CHECK PERMISSION (PROTECTED)
-// POST: admin_auth.php?action=check-permission
+// 5. CHECK PERMISSION
 // =============================================
 elseif ($method === 'POST' && $action === 'check-permission') {
     $admin = $auth->validateToken();

@@ -1,8 +1,6 @@
 <?php
 // backend/includes/admin_auth.php
-// =============================================
-// ADMIN AUTHENTICATION - LOGIN/REGISTER ONLY
-// =============================================
+// Updated version without username field
 
 require_once __DIR__ . '/../config/admin_database.php';
 
@@ -15,40 +13,58 @@ class AdminAuth {
         $this->db = $adminDb->getConnection();
     }
     
-    // Generate admin token
     private function generateToken() {
         return 'admin_' . bin2hex(random_bytes(32)) . '_' . time();
     }
     
-    // LOGIN - Any admin can login
-    public function login($email, $password, $rememberMe = false) {
-        $stmt = $this->db->prepare("
-            SELECT * FROM admin_users 
-            WHERE email = :email AND is_active = 1
-        ");
-        $stmt->execute([':email' => $email]);
+    // LOGIN - Supports email OR phone number
+    public function login($identifier, $password, $rememberMe = false) {
+        $isEmail = filter_var($identifier, FILTER_VALIDATE_EMAIL);
+        $isPhone = preg_match('/^[\+]?[0-9\s\-\(\)]{10,}$/', $identifier);
+        
+        if (!$isEmail && !$isPhone) {
+            return ['success' => false, 'message' => 'Please enter a valid email or phone number'];
+        }
+        
+        // Query by email OR phone (no username)
+        if ($isEmail) {
+            $stmt = $this->db->prepare("
+                SELECT * FROM admin_users 
+                WHERE email = :identifier AND is_active = 1
+            ");
+            $stmt->execute([':identifier' => $identifier]);
+        } else {
+            $stmt = $this->db->prepare("
+                SELECT * FROM admin_users 
+                WHERE phone = :identifier AND is_active = 1
+            ");
+            $stmt->execute([':identifier' => $identifier]);
+        }
+        
         $admin = $stmt->fetch();
         
         if (!$admin || !password_verify($password, $admin['password_hash'])) {
-            return ['success' => false, 'message' => 'Invalid email or password'];
+            $this->logLoginAttempt($identifier, false, 'Invalid credentials');
+            return ['success' => false, 'message' => 'Invalid email/phone or password'];
         }
         
-        // Get admin permissions
+        if ($admin['is_locked']) {
+            return ['success' => false, 'message' => 'Account is locked. Please contact support.'];
+        }
+        
         $permissions = $this->getPermissions($admin['role']);
         
-        // Generate token
         $token = $this->generateToken();
         $expiresIn = $rememberMe ? 30 * 24 * 3600 : 24 * 3600;
         $expiresAt = date('Y-m-d H:i:s', time() + $expiresIn);
         
-        // Save session
+        $ipAddress = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? null;
+        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
+        
         $stmt = $this->db->prepare("
             INSERT INTO admin_sessions (admin_id, token, ip_address, user_agent, expires_at)
             VALUES (:admin_id, :token, :ip, :ua, :expires)
         ");
-        
-        $ipAddress = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? null;
-        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
         
         $stmt->execute([
             ':admin_id' => $admin['id'],
@@ -58,11 +74,12 @@ class AdminAuth {
             ':expires' => $expiresAt
         ]);
         
-        // Update last login
         $stmt = $this->db->prepare("
             UPDATE admin_users SET last_login = NOW(), last_ip = :ip WHERE id = :id
         ");
         $stmt->execute([':ip' => $ipAddress, ':id' => $admin['id']]);
+        
+        $this->logLoginAttempt($identifier, true, 'Login successful');
         
         unset($admin['password_hash']);
         
@@ -77,9 +94,33 @@ class AdminAuth {
         ];
     }
     
-    // REGISTER - Only Super Admin can create new admins
+    private function logLoginAttempt($identifier, $success, $reason = null) {
+        try {
+            $ipAddress = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? null;
+            $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
+            
+            $isEmail = filter_var($identifier, FILTER_VALIDATE_EMAIL);
+            
+            $stmt = $this->db->prepare("
+                INSERT INTO admin_login_history (email, phone, ip_address, user_agent, login_status, failure_reason)
+                VALUES (:email, :phone, :ip, :ua, :status, :reason)
+            ");
+            
+            $stmt->execute([
+                ':email' => $isEmail ? $identifier : null,
+                ':phone' => !$isEmail ? $identifier : null,
+                ':ip' => $ipAddress,
+                ':ua' => $userAgent,
+                ':status' => $success ? 'success' : 'failed',
+                ':reason' => $reason
+            ]);
+        } catch (Exception $e) {
+            // Silent fail
+        }
+    }
+    
+    // REGISTER - No username field
     public function register($data, $createdBy, $creatorRole) {
-        // Only Super Admin can create admins
         if ($creatorRole !== 'super_admin') {
             return [
                 'success' => false, 
@@ -94,14 +135,13 @@ class AdminAuth {
             return ['success' => false, 'message' => 'Email already exists'];
         }
         
-        // Check if username exists
-        $stmt = $this->db->prepare("SELECT COUNT(*) FROM admin_users WHERE username = :username");
-        $stmt->execute([':username' => $data['username']]);
+        // Check if phone exists
+        $stmt = $this->db->prepare("SELECT COUNT(*) FROM admin_users WHERE phone = :phone");
+        $stmt->execute([':phone' => $data['phone']]);
         if ($stmt->fetchColumn() > 0) {
-            return ['success' => false, 'message' => 'Username already exists'];
+            return ['success' => false, 'message' => 'Phone number already exists'];
         }
         
-        // Prevent creating another Super Admin
         if ($data['role'] === 'super_admin') {
             $stmt = $this->db->prepare("SELECT COUNT(*) FROM admin_users WHERE role = 'super_admin'");
             $stmt->execute();
@@ -113,19 +153,16 @@ class AdminAuth {
             }
         }
         
-        // Hash password
         $passwordHash = password_hash($data['password'], PASSWORD_DEFAULT);
         
-        // Insert new admin
         $stmt = $this->db->prepare("
-            INSERT INTO admin_users (username, email, phone, full_name, password_hash, role, created_by)
-            VALUES (:username, :email, :phone, :full_name, :password_hash, :role, :created_by)
+            INSERT INTO admin_users (email, phone, full_name, password_hash, role, created_by)
+            VALUES (:email, :phone, :full_name, :password_hash, :role, :created_by)
         ");
         
         $stmt->execute([
-            ':username' => $data['username'],
             ':email' => $data['email'],
-            ':phone' => $data['phone'] ?? null,
+            ':phone' => $data['phone'],
             ':full_name' => $data['full_name'],
             ':password_hash' => $passwordHash,
             ':role' => $data['role'],
@@ -143,7 +180,6 @@ class AdminAuth {
         ];
     }
     
-    // VALIDATE TOKEN - Check if user is authenticated
     public function validateToken() {
         $headers = getallheaders();
         $token = null;
@@ -164,12 +200,11 @@ class AdminAuth {
             return false;
         }
         
-        // Validate token
         $stmt = $this->db->prepare("
-            SELECT s.*, a.id as admin_id, a.username, a.email, a.full_name, a.role, a.is_active 
+            SELECT s.*, a.id as admin_id, a.email, a.phone, a.full_name, a.role, a.is_active 
             FROM admin_sessions s 
             JOIN admin_users a ON s.admin_id = a.id 
-            WHERE s.token = :token AND s.expires_at > NOW()
+            WHERE s.token = :token AND s.expires_at > NOW() AND s.is_active = 1
         ");
         $stmt->execute([':token' => $token]);
         $session = $stmt->fetch();
@@ -186,8 +221,8 @@ class AdminAuth {
         
         $this->currentAdmin = [
             'id' => $session['admin_id'],
-            'username' => $session['username'],
             'email' => $session['email'],
+            'phone' => $session['phone'],
             'full_name' => $session['full_name'],
             'role' => $session['role']
         ];
@@ -195,19 +230,17 @@ class AdminAuth {
         return $this->currentAdmin;
     }
     
-    // GET PERMISSIONS for a role
     public function getPermissions($role) {
         if ($role === 'super_admin') {
-            $stmt = $this->db->query("SELECT DISTINCT permission FROM admin_permissions");
+            $stmt = $this->db->query("SELECT DISTINCT permission FROM admin_role_permissions");
             return $stmt->fetchAll(PDO::FETCH_COLUMN);
         }
         
-        $stmt = $this->db->prepare("SELECT permission FROM admin_permissions WHERE role = :role");
+        $stmt = $this->db->prepare("SELECT permission FROM admin_role_permissions WHERE role = :role");
         $stmt->execute([':role' => $role]);
         return $stmt->fetchAll(PDO::FETCH_COLUMN);
     }
     
-    // CHECK if current admin has permission
     public function hasPermission($permission) {
         if (!$this->currentAdmin) {
             return false;
@@ -221,14 +254,12 @@ class AdminAuth {
         return in_array($permission, $permissions);
     }
     
-    // GET current admin
     public function getCurrentAdmin() {
         return $this->currentAdmin;
     }
     
-    // LOGOUT
     public function logout($token) {
-        $stmt = $this->db->prepare("DELETE FROM admin_sessions WHERE token = :token");
+        $stmt = $this->db->prepare("UPDATE admin_sessions SET is_active = 0 WHERE token = :token");
         $stmt->execute([':token' => $token]);
         return ['success' => true, 'message' => 'Logged out successfully'];
     }
