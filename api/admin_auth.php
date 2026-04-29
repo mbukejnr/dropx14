@@ -1,12 +1,19 @@
 <?php
 // backend/api/admin_auth.php
 // =============================================
-// ADMIN API - LOGIN, REGISTER, LOGOUT, ME
-// With CORS support for Vercel frontend
+// PRODUCTION API - Dynamic CORS Support
 // =============================================
 
-// CORS Headers - Allow Vercel frontend
-header("Access-Control-Allow-Origin: https://frontend-pink-pi-70.vercel.app");
+// =============================================
+// PRODUCTION CORS CONFIGURATION
+// Allow only your production Vercel frontend
+// =============================================
+
+// Get the actual frontend URL from environment variable
+$production_frontend = getenv('FRONTEND_URL') ?: 'https://frontend-gf0q7vyz3-mbukejnrs-projects.vercel.app';
+
+// Set CORS headers - Allow only your production frontend
+header("Access-Control-Allow-Origin: $production_frontend");
 header("Access-Control-Allow-Credentials: true");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With");
@@ -18,6 +25,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
+// Continue with your existing code...
 require_once __DIR__ . '/../config/admin_database.php';
 require_once __DIR__ . '/../includes/admin_auth.php';
 
@@ -28,7 +36,6 @@ $action = isset($_GET['action']) ? $_GET['action'] : '';
 
 // =============================================
 // 1. LOGIN - With Email OR Phone
-// POST: admin_auth.php?action=login
 // =============================================
 if ($method === 'POST' && $action === 'login') {
     $data = json_decode(file_get_contents('php://input'), true);
@@ -141,12 +148,15 @@ elseif ($method === 'GET' && $action === 'me') {
             WHERE id = :id
         ");
         $stmt->execute([':id' => $admin['id']]);
-        $adminDetails = $stmt->fetch();
+        $adminDetails = $stmt->fetch(PDO::FETCH_ASSOC);
         
-        $permissions = $auth->getPermissions($admin['role']);
-        $adminDetails['permissions'] = $permissions;
-        
-        $db->sendResponse($adminDetails);
+        if ($adminDetails) {
+            $permissions = $auth->getPermissions($admin['role']);
+            $adminDetails['permissions'] = $permissions;
+            $db->sendResponse($adminDetails);
+        } else {
+            $db->sendError('Admin not found', 404);
+        }
     }
 }
 
