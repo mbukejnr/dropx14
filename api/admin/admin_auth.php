@@ -1,12 +1,11 @@
 <?php
-// backend/api/admin_auth.php
+// backend/api/admin/admin_auth.php
 // =============================================
 // PRODUCTION API - Dynamic CORS Support
 // =============================================
 
 // =============================================
 // PRODUCTION CORS CONFIGURATION
-// Allow only your production Vercel frontend
 // =============================================
 
 // Get the actual frontend URL from environment variable
@@ -25,9 +24,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-// Continue with your existing code...
-require_once __DIR__ . '/../config/admin_database.php';
-require_once __DIR__ . '/../includes/admin_auth.php';
+// =============================================
+// FIXED PATHS - Go up two levels from /api/admin/ to reach /backend/
+// =============================================
+// From: backend/api/admin/admin_auth.php
+// To:   backend/config/admin_database.php
+//       backend/includes/admin_auth.php (but that's the class file, careful!)
+
+require_once __DIR__ . '/../../config/admin_database.php';
+require_once __DIR__ . '/../../includes/admin_auth.php';
 
 $db = AdminDatabase::getInstance();
 $auth = new AdminAuth();
