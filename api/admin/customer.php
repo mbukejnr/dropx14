@@ -7,7 +7,6 @@
 // =============================================
 $production_frontend = getenv('FRONTEND_URL') ?: 'https://frontend-gf0q7vyz3-mbukejnrs-projects.vercel.app';
 
-// Also allow localhost for development
 $allowed_origins = [
     $production_frontend,
     'https://frontend-pink-pi-70.vercel.app',
@@ -29,7 +28,6 @@ header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
 header("Content-Type: application/json; charset=UTF-8");
 
-// Handle preflight OPTIONS request
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
@@ -38,12 +36,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 require_once __DIR__ . '/../../config/admin_database.php';
 require_once __DIR__ . '/../../includes/admin_auth.php';
 
-// Initialize database and auth
 $db = AdminDatabase::getInstance();
 $conn = $db->getConnection();
 $auth = new AdminAuth();
 
-// Verify admin is logged in
 $admin = $auth->validateToken();
 
 if (!$admin) {
@@ -54,18 +50,11 @@ $method = $_SERVER['REQUEST_METHOD'];
 $action = isset($_GET['action']) ? $_GET['action'] : '';
 $customerId = isset($_GET['id']) ? intval($_GET['id']) : null;
 
-// =============================================
-// PERMISSION CHECKS
-// =============================================
 function checkPermission($permission, $auth, $db) {
     if (!$auth->hasPermission($permission)) {
         $db->sendForbidden("You don't have permission to perform this action. Required: $permission");
     }
 }
-
-// =============================================
-// HELPER FUNCTIONS
-// =============================================
 
 function formatCustomerData($customer) {
     return [
@@ -90,7 +79,8 @@ function formatCustomerData($customer) {
         'last_login' => $customer['last_login'] ?? null,
         'created_at' => $customer['created_at'] ?? null,
         'updated_at' => $customer['updated_at'] ?? null,
-        'wallet_balance' => (float) ($customer['wallet_balance'] ?? 0)
+        'wallet_balance' => (float) ($customer['wallet_balance'] ?? 0),
+        'last_order_date' => $customer['last_order_date'] ?? null
     ];
 }
 
@@ -104,7 +94,6 @@ if ($method === 'GET' && $action === 'list') {
     $limit = isset($_GET['limit']) ? min(100, max(1, intval($_GET['limit']))) : 20;
     $search = isset($_GET['search']) ? trim($_GET['search']) : '';
     $status = isset($_GET['status']) ? $_GET['status'] : '';
-    $memberLevel = isset($_GET['member_level']) ? $_GET['member_level'] : '';
     $offset = ($page - 1) * $limit;
     
     $where = [];
@@ -119,31 +108,21 @@ if ($method === 'GET' && $action === 'list') {
         $where[] = "is_active = 1";
     } elseif ($status === 'inactive') {
         $where[] = "is_active = 0";
-    } elseif ($status === 'verified') {
-        $where[] = "verified = 1";
-    } elseif ($status === 'unverified') {
-        $where[] = "verified = 0";
-    }
-    
-    if ($memberLevel) {
-        $where[] = "member_level = :member_level";
-        $params[':member_level'] = $memberLevel;
     }
     
     $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
     
-    // Get total count
     $countSql = "SELECT COUNT(*) as total FROM users u $whereClause";
     $countStmt = $conn->prepare($countSql);
     $countStmt->execute($params);
     $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
     
-    // Get customers with stats
     $sql = "SELECT 
                 u.*,
                 (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as order_count,
                 (SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE user_id = u.id AND status = 'completed') as total_spent,
-                (SELECT balance FROM dropx_wallets WHERE user_id = u.id AND is_active = 1 LIMIT 1) as wallet_balance
+                (SELECT balance FROM dropx_wallets WHERE user_id = u.id AND is_active = 1 LIMIT 1) as wallet_balance,
+                (SELECT MAX(created_at) FROM orders WHERE user_id = u.id) as last_order_date
             FROM users u
             $whereClause
             ORDER BY u.created_at DESC
@@ -158,18 +137,12 @@ if ($method === 'GET' && $action === 'list') {
     $stmt->execute();
     $customers = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // Format customer data
     foreach ($customers as &$customer) {
         $customer = formatCustomerData($customer);
     }
     
-    // Get member levels for filter
-    $levelsStmt = $conn->query("SELECT DISTINCT member_level FROM users WHERE member_level IS NOT NULL ORDER BY member_level");
-    $memberLevels = $levelsStmt->fetchAll(PDO::FETCH_COLUMN);
-    
     $db->sendResponse([
         'customers' => $customers,
-        'member_levels' => $memberLevels,
         'pagination' => [
             'current_page' => $page,
             'per_page' => $limit,
@@ -189,7 +162,8 @@ elseif ($method === 'GET' && $customerId && $action === 'details') {
         SELECT u.*,
             (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as order_count,
             (SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE user_id = u.id AND status = 'completed') as total_spent,
-            (SELECT balance FROM dropx_wallets WHERE user_id = u.id AND is_active = 1 LIMIT 1) as wallet_balance
+            (SELECT balance FROM dropx_wallets WHERE user_id = u.id AND is_active = 1 LIMIT 1) as wallet_balance,
+            (SELECT MAX(created_at) FROM orders WHERE user_id = u.id) as last_order_date
         FROM users u
         WHERE u.id = :id
     ");
@@ -206,7 +180,84 @@ elseif ($method === 'GET' && $customerId && $action === 'details') {
 }
 
 // =============================================
-// 3. UPDATE CUSTOMER
+// 3. CREATE NEW CUSTOMER (ADD)
+// =============================================
+elseif ($method === 'POST' && $action === 'create') {
+    checkPermission('create_customers', $auth, $db);
+    
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    $required = ['full_name', 'email', 'phone'];
+    foreach ($required as $field) {
+        if (empty($data[$field])) {
+            $db->sendError("Field '{$field}' is required", 400);
+        }
+    }
+    
+    if (!empty($data['email']) && !filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
+        $db->sendError('Invalid email format', 400);
+    }
+    
+    if (!empty($data['email'])) {
+        $checkEmail = $conn->prepare("SELECT id FROM users WHERE email = :email");
+        $checkEmail->execute([':email' => $data['email']]);
+        if ($checkEmail->fetch()) {
+            $db->sendError('Email already exists', 400);
+        }
+    }
+    
+    if (!empty($data['phone'])) {
+        $checkPhone = $conn->prepare("SELECT id FROM users WHERE phone = :phone");
+        $checkPhone->execute([':phone' => $data['phone']]);
+        if ($checkPhone->fetch()) {
+            $db->sendError('Phone number already exists', 400);
+        }
+    }
+    
+    $password = !empty($data['password']) ? $data['password'] : bin2hex(random_bytes(4));
+    $hashedPassword = password_hash($password, PASSWORD_DEFAULT);
+    
+    $stmt = $conn->prepare("
+        INSERT INTO users (
+            full_name, email, phone, password, gender, avatar,
+            member_level, member_points, total_orders, login_method,
+            rating, verified, member_since, created_at, updated_at,
+            email_verified, phone_verified, is_active
+        ) VALUES (
+            :full_name, :email, :phone, :password, :gender, :avatar,
+            'basic', 0, 0, 'email', 0.00, 1, :member_since, NOW(), NOW(),
+            :email_verified, :phone_verified, 1
+        )
+    ");
+    
+    $stmt->execute([
+        ':full_name' => $data['full_name'],
+        ':email' => $data['email'] ?? null,
+        ':phone' => $data['phone'] ?? null,
+        ':password' => $hashedPassword,
+        ':gender' => $data['gender'] ?? null,
+        ':avatar' => $data['avatar'] ?? null,
+        ':member_since' => date('M d, Y'),
+        ':email_verified' => $data['email_verified'] ?? 1,
+        ':phone_verified' => $data['phone_verified'] ?? 1
+    ]);
+    
+    $newCustomerId = $conn->lastInsertId();
+    
+    $walletStmt = $conn->prepare("
+        INSERT INTO dropx_wallets (user_id, balance, currency, is_active, created_at, updated_at)
+        VALUES (:user_id, 0, 'MWK', 1, NOW(), NOW())
+    ");
+    $walletStmt->execute([':user_id' => $newCustomerId]);
+    
+    $db->sendResponse([
+        'id' => $newCustomerId,
+        'generated_password' => $password
+    ], 'Customer created successfully', 201);
+}
+
+// =============================================
+// 4. UPDATE CUSTOMER
 // =============================================
 elseif ($method === 'PUT' && $customerId && $action === 'update') {
     checkPermission('edit_customers', $auth, $db);
@@ -246,23 +297,20 @@ elseif ($method === 'PUT' && $customerId && $action === 'update') {
 }
 
 // =============================================
-// 4. DELETE/SUSPEND CUSTOMER
+// 5. DELETE CUSTOMER
 // =============================================
 elseif ($method === 'DELETE' && $customerId && $action === 'delete') {
     checkPermission('delete_customers', $auth, $db);
     
-    // Check if customer has orders
     $check = $conn->prepare("SELECT COUNT(*) FROM orders WHERE user_id = :id");
     $check->execute([':id' => $customerId]);
     $orderCount = $check->fetchColumn();
     
     if ($orderCount > 0) {
-        // Soft delete - just deactivate
         $stmt = $conn->prepare("UPDATE users SET is_active = 0, updated_at = NOW() WHERE id = :id");
         $stmt->execute([':id' => $customerId]);
         $db->sendResponse([], 'Customer deactivated successfully (has existing orders)');
     } else {
-        // Hard delete
         $stmt = $conn->prepare("DELETE FROM users WHERE id = :id");
         $stmt->execute([':id' => $customerId]);
         $db->sendResponse([], 'Customer deleted successfully');
@@ -270,7 +318,7 @@ elseif ($method === 'DELETE' && $customerId && $action === 'delete') {
 }
 
 // =============================================
-// 5. TOGGLE CUSTOMER STATUS
+// 6. TOGGLE CUSTOMER STATUS
 // =============================================
 elseif ($method === 'POST' && $customerId && $action === 'toggle-status') {
     checkPermission('edit_customers', $auth, $db);
@@ -289,7 +337,7 @@ elseif ($method === 'POST' && $customerId && $action === 'toggle-status') {
 }
 
 // =============================================
-// 6. GET CUSTOMER ORDERS
+// 7. GET CUSTOMER ORDERS
 // =============================================
 elseif ($method === 'GET' && $customerId && $action === 'orders') {
     checkPermission('view_customers', $auth, $db);
@@ -298,12 +346,10 @@ elseif ($method === 'GET' && $customerId && $action === 'orders') {
     $limit = isset($_GET['limit']) ? min(50, max(1, intval($_GET['limit']))) : 20;
     $offset = ($page - 1) * $limit;
     
-    // Get total
     $countStmt = $conn->prepare("SELECT COUNT(*) as total FROM orders WHERE user_id = :user_id");
     $countStmt->execute([':user_id' => $customerId]);
     $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
     
-    // Get orders
     $stmt = $conn->prepare("
         SELECT o.*, m.name as merchant_name
         FROM orders o
@@ -330,7 +376,7 @@ elseif ($method === 'GET' && $customerId && $action === 'orders') {
 }
 
 // =============================================
-// 7. GET CUSTOMER ADDRESSES
+// 8. GET CUSTOMER ADDRESSES
 // =============================================
 elseif ($method === 'GET' && $customerId && $action === 'addresses') {
     checkPermission('view_customers', $auth, $db);
@@ -347,12 +393,11 @@ elseif ($method === 'GET' && $customerId && $action === 'addresses') {
 }
 
 // =============================================
-// 8. GET CUSTOMER WALLET
+// 9. GET CUSTOMER WALLET
 // =============================================
 elseif ($method === 'GET' && $customerId && $action === 'wallet') {
     checkPermission('view_customers', $auth, $db);
     
-    // Get wallet balance
     $walletStmt = $conn->prepare("
         SELECT balance, currency, is_active 
         FROM dropx_wallets 
@@ -362,7 +407,6 @@ elseif ($method === 'GET' && $customerId && $action === 'wallet') {
     $walletStmt->execute([':user_id' => $customerId]);
     $wallet = $walletStmt->fetch(PDO::FETCH_ASSOC);
     
-    // Get transactions
     $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
     $limit = isset($_GET['limit']) ? min(50, max(1, intval($_GET['limit']))) : 20;
     $offset = ($page - 1) * $limit;
@@ -399,7 +443,7 @@ elseif ($method === 'GET' && $customerId && $action === 'wallet') {
 }
 
 // =============================================
-// 9. ADJUST WALLET BALANCE
+// 10. ADJUST WALLET BALANCE
 // =============================================
 elseif ($method === 'POST' && $customerId && $action === 'adjust-wallet') {
     checkPermission('edit_customers', $auth, $db);
@@ -413,7 +457,6 @@ elseif ($method === 'POST' && $customerId && $action === 'adjust-wallet') {
         $db->sendError('Amount must be non-zero', 400);
     }
     
-    // Get current wallet
     $walletStmt = $conn->prepare("
         SELECT id, balance FROM dropx_wallets 
         WHERE user_id = :user_id AND is_active = 1
@@ -439,13 +482,11 @@ elseif ($method === 'POST' && $customerId && $action === 'adjust-wallet') {
         }
     }
     
-    // Update wallet balance
     $updateStmt = $conn->prepare("
         UPDATE dropx_wallets SET balance = :balance, updated_at = NOW() WHERE id = :id
     ");
     $updateStmt->execute([':balance' => $newBalance, ':id' => $walletId]);
     
-    // Log transaction
     $txStmt = $conn->prepare("
         INSERT INTO wallet_transactions (user_id, amount, type, status, description, reference, created_at)
         VALUES (:user_id, :amount, :type, 'completed', :description, :reference, NOW())
@@ -466,7 +507,7 @@ elseif ($method === 'POST' && $customerId && $action === 'adjust-wallet') {
 }
 
 // =============================================
-// 10. CUSTOMER STATS
+// 11. CUSTOMER STATS
 // =============================================
 elseif ($method === 'GET' && $action === 'stats') {
     checkPermission('view_customers', $auth, $db);
@@ -492,7 +533,7 @@ elseif ($method === 'GET' && $action === 'stats') {
 }
 
 // =============================================
-// 11. BULK STATUS UPDATE
+// 12. BULK STATUS UPDATE
 // =============================================
 elseif ($method === 'POST' && $action === 'bulk-status') {
     checkPermission('edit_customers', $auth, $db);
@@ -524,7 +565,7 @@ elseif ($method === 'POST' && $action === 'bulk-status') {
 }
 
 // =============================================
-// 12. EXPORT CUSTOMERS TO CSV
+// 13. EXPORT CUSTOMERS TO CSV
 // =============================================
 elseif ($method === 'GET' && $action === 'export') {
     checkPermission('view_customers', $auth, $db);
@@ -542,12 +583,15 @@ elseif ($method === 'GET' && $action === 'export') {
     $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
     
     $sql = "SELECT 
-                id, full_name, email, phone, gender, member_level, 
-                member_points, total_orders, verified, is_active,
-                created_at, last_login
+                id, full_name, email, phone, gender, 
+                total_orders, 
+                (SELECT balance FROM dropx_wallets WHERE user_id = u.id AND is_active = 1 LIMIT 1) as wallet_balance,
+                is_active,
+                DATE_FORMAT(created_at, '%Y-%m-%d') as registered_date,
+                DATE_FORMAT(last_login, '%Y-%m-%d %H:%i') as last_active
             FROM users u
             $whereClause
-            ORDER BY u.created_at DESC";
+            ORDER BY u.id DESC";
     
     $stmt = $conn->prepare($sql);
     foreach ($params as $key => $value) {
@@ -560,22 +604,26 @@ elseif ($method === 'GET' && $action === 'export') {
     header('Content-Disposition: attachment; filename="customers_' . date('Y-m-d') . '.csv"');
     
     $output = fopen('php://output', 'w');
-    fputcsv($output, ['ID', 'Full Name', 'Email', 'Phone', 'Gender', 'Member Level', 'Points', 'Total Orders', 'Verified', 'Active', 'Registered Date', 'Last Login']);
+    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
+    
+    fputcsv($output, [
+        'ID', 'Full Name', 'Email', 'Phone', 'Gender',
+        'Total Orders', 'Wallet Balance (MK)', 'Status',
+        'Registered Date', 'Last Active'
+    ]);
     
     foreach ($customers as $customer) {
         fputcsv($output, [
             $customer['id'],
             $customer['full_name'],
-            $customer['email'],
-            $customer['phone'],
-            $customer['gender'],
-            $customer['member_level'],
-            $customer['member_points'],
-            $customer['total_orders'],
-            $customer['verified'] ? 'Yes' : 'No',
-            $customer['is_active'] ? 'Yes' : 'No',
-            $customer['created_at'],
-            $customer['last_login']
+            $customer['email'] ?? '',
+            $customer['phone'] ?? '',
+            $customer['gender'] ?? '',
+            $customer['total_orders'] ?? 0,
+            number_format($customer['wallet_balance'] ?? 0, 2),
+            $customer['is_active'] ? 'Active' : 'Inactive',
+            $customer['registered_date'] ?? '',
+            $customer['last_active'] ?? 'Never'
         ]);
     }
     
@@ -587,6 +635,6 @@ elseif ($method === 'GET' && $action === 'export') {
 // Invalid action handler
 // =============================================
 else {
-    $db->sendError('Invalid action. Available actions: list, details, update, delete, toggle-status, orders, addresses, wallet, adjust-wallet, stats, bulk-status, export', 400);
+    $db->sendError('Invalid action. Available actions: list, details, create, update, delete, toggle-status, orders, addresses, wallet, adjust-wallet, stats, bulk-status, export', 400);
 }
 ?>
