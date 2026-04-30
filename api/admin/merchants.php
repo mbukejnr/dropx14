@@ -1,41 +1,40 @@
 <?php
 // backend/api/admin/merchants.php
 // COMPLETE PRODUCTION-READY ADMIN MERCHANT API
-// Handles: Merchants, Menu Items, Quick Orders, Ads, Categories, Reviews, Orders
+// INTEGRATED WITH YOUR EXISTING AUTH SYSTEM
 
 // =============================================
-// CORS CONFIGURATION
+// CORS & AUTH LOADING
 // =============================================
-$production_frontend = getenv('FRONTEND_URL') ?: 'https://frontend-gf0q7vyz3-mbukejnrs-projects.vercel.app';
-
-header("Access-Control-Allow-Origin: $production_frontend");
-header("Access-Control-Allow-Credentials: true");
-header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With");
-header("Content-Type: application/json; charset=UTF-8");
-
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
-    exit();
-}
-
 require_once __DIR__ . '/../../config/admin_database.php';
 require_once __DIR__ . '/../../includes/admin_auth.php';
 
-// Verify admin is logged in
+// Initialize database and auth
+$db = AdminDatabase::getInstance();
+$conn = $db->getConnection();
 $auth = new AdminAuth();
+
+// Verify admin is logged in and get admin data
 $admin = $auth->validateToken();
 
 if (!$admin) {
+    // validateToken already sends error response
     exit();
 }
 
-$db = AdminDatabase::getInstance();
-$conn = $db->getConnection();
 $method = $_SERVER['REQUEST_METHOD'];
 $action = isset($_GET['action']) ? $_GET['action'] : '';
 $merchantId = isset($_GET['id']) ? intval($_GET['id']) : null;
 $baseUrl = "https://dropx13-production.up.railway.app";
+
+// =============================================
+// PERMISSION CHECKS
+// =============================================
+function checkPermission($permission, $auth, $db) {
+    if (!$auth->hasPermission($permission)) {
+        $db->sendForbidden("You don't have permission to perform this action. Required: $permission");
+    }
+}
 
 // =============================================
 // 1. MERCHANT MANAGEMENT (CRUD)
@@ -43,6 +42,11 @@ $baseUrl = "https://dropx13-production.up.railway.app";
 
 // GET: List all merchants
 if ($method === 'GET' && $action === 'list') {
+    // Super admin and operations_admin can view all merchants
+    if ($admin['role'] !== 'super_admin' && $admin['role'] !== 'operations_admin') {
+        checkPermission('view_merchants', $auth, $db);
+    }
+    
     $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
     $limit = isset($_GET['limit']) ? min(100, max(1, intval($_GET['limit']))) : 20;
     $search = isset($_GET['search']) ? trim($_GET['search']) : '';
@@ -109,6 +113,11 @@ if ($method === 'GET' && $action === 'list') {
     $db->sendResponse([
         'merchants' => $merchants,
         'categories' => $categories,
+        'admin' => [
+            'id' => $admin['id'],
+            'role' => $admin['role'],
+            'name' => $admin['full_name']
+        ],
         'pagination' => [
             'current_page' => $page,
             'per_page' => $limit,
@@ -120,6 +129,8 @@ if ($method === 'GET' && $action === 'list') {
 
 // GET: Single merchant details
 elseif ($method === 'GET' && $merchantId && $action === 'details') {
+    checkPermission('view_merchants', $auth, $db);
+    
     $stmt = $conn->prepare("
         SELECT m.*,
             (SELECT COUNT(*) FROM menu_items WHERE merchant_id = m.id) as total_menu_items,
@@ -142,6 +153,8 @@ elseif ($method === 'GET' && $merchantId && $action === 'details') {
 
 // POST: Create merchant
 elseif ($method === 'POST' && $action === 'create') {
+    checkPermission('create_merchants', $auth, $db);
+    
     $data = json_decode(file_get_contents('php://input'), true);
     
     $required = ['name', 'email', 'phone', 'category'];
@@ -160,6 +173,13 @@ elseif ($method === 'POST' && $action === 'create') {
     $check->execute([':email' => $data['email']]);
     if ($check->fetch()) {
         $db->sendError('Email already exists', 400);
+    }
+    
+    // Check if phone exists
+    $check = $conn->prepare("SELECT id FROM merchants WHERE phone = :phone");
+    $check->execute([':phone' => $data['phone']]);
+    if ($check->fetch()) {
+        $db->sendError('Phone number already exists', 400);
     }
     
     $stmt = $conn->prepare("
@@ -192,11 +212,26 @@ elseif ($method === 'POST' && $action === 'create') {
     ]);
     
     $newId = $conn->lastInsertId();
+    
+    // Log the action
+    $logStmt = $conn->prepare("
+        INSERT INTO admin_action_log (admin_id, action, target_type, target_id, details, ip_address)
+        VALUES (:admin_id, 'create', 'merchant', :target_id, :details, :ip)
+    ");
+    $logStmt->execute([
+        ':admin_id' => $admin['id'],
+        ':target_id' => $newId,
+        ':details' => json_encode(['name' => $data['name'], 'email' => $data['email']]),
+        ':ip' => $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? null
+    ]);
+    
     $db->sendResponse(['id' => $newId], 'Merchant created successfully', 201);
 }
 
 // PUT: Update merchant
 elseif ($method === 'PUT' && $merchantId && $action === 'update') {
+    checkPermission('edit_merchants', $auth, $db);
+    
     $data = json_decode(file_get_contents('php://input'), true);
     
     $fields = [];
@@ -225,11 +260,24 @@ elseif ($method === 'PUT' && $merchantId && $action === 'update') {
     $stmt = $conn->prepare($sql);
     $stmt->execute($params);
     
+    // Log the action
+    $logStmt = $conn->prepare("
+        INSERT INTO admin_action_log (admin_id, action, target_type, target_id, ip_address)
+        VALUES (:admin_id, 'update', 'merchant', :target_id, :ip)
+    ");
+    $logStmt->execute([
+        ':admin_id' => $admin['id'],
+        ':target_id' => $merchantId,
+        ':ip' => $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? null
+    ]);
+    
     $db->sendResponse([], 'Merchant updated successfully');
 }
 
 // DELETE: Delete merchant
 elseif ($method === 'DELETE' && $merchantId && $action === 'delete') {
+    checkPermission('delete_merchants', $auth, $db);
+    
     // Check if merchant has orders
     $check = $conn->prepare("SELECT COUNT(*) FROM orders WHERE merchant_id = :id");
     $check->execute([':id' => $merchantId]);
@@ -239,17 +287,33 @@ elseif ($method === 'DELETE' && $merchantId && $action === 'delete') {
         // Soft delete - just deactivate
         $stmt = $conn->prepare("UPDATE merchants SET is_active = 0, updated_at = NOW() WHERE id = :id");
         $stmt->execute([':id' => $merchantId]);
-        $db->sendResponse([], 'Merchant deactivated successfully (has existing orders)');
+        $message = 'Merchant deactivated successfully (has existing orders)';
     } else {
         // Hard delete
         $stmt = $conn->prepare("DELETE FROM merchants WHERE id = :id");
         $stmt->execute([':id' => $merchantId]);
-        $db->sendResponse([], 'Merchant deleted successfully');
+        $message = 'Merchant deleted successfully';
     }
+    
+    // Log the action
+    $logStmt = $conn->prepare("
+        INSERT INTO admin_action_log (admin_id, action, target_type, target_id, details, ip_address)
+        VALUES (:admin_id, 'delete', 'merchant', :target_id, :details, :ip)
+    ");
+    $logStmt->execute([
+        ':admin_id' => $admin['id'],
+        ':target_id' => $merchantId,
+        ':details' => json_encode(['soft_delete' => $orderCount > 0]),
+        ':ip' => $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? null
+    ]);
+    
+    $db->sendResponse([], $message);
 }
 
 // POST: Toggle merchant status (open/close)
 elseif ($method === 'POST' && $merchantId && $action === 'toggle-status') {
+    checkPermission('edit_merchants', $auth, $db);
+    
     $data = json_decode(file_get_contents('php://input'), true);
     $isOpen = isset($data['is_open']) ? intval($data['is_open']) : null;
     
@@ -269,6 +333,8 @@ elseif ($method === 'POST' && $merchantId && $action === 'toggle-status') {
 
 // GET: All menu items for a merchant
 elseif ($method === 'GET' && $merchantId && $action === 'menu-items') {
+    checkPermission('view_menu', $auth, $db);
+    
     $stmt = $conn->prepare("
         SELECT mi.*,
             CASE WHEN mi.has_variants = 1 THEN mi.variants_json ELSE NULL END as variants
@@ -287,6 +353,8 @@ elseif ($method === 'GET' && $merchantId && $action === 'menu-items') {
 
 // GET: Single menu item
 elseif ($method === 'GET' && $action === 'menu-item' && isset($_GET['item_id'])) {
+    checkPermission('view_menu', $auth, $db);
+    
     $itemId = intval($_GET['item_id']);
     $stmt = $conn->prepare("SELECT * FROM menu_items WHERE id = :id");
     $stmt->execute([':id' => $itemId]);
@@ -305,6 +373,8 @@ elseif ($method === 'GET' && $action === 'menu-item' && isset($_GET['item_id']))
 
 // POST: Create menu item
 elseif ($method === 'POST' && $action === 'create-menu-item') {
+    checkPermission('edit_menu', $auth, $db);
+    
     $data = json_decode(file_get_contents('php://input'), true);
     
     $required = ['merchant_id', 'name', 'price'];
@@ -343,6 +413,8 @@ elseif ($method === 'POST' && $action === 'create-menu-item') {
 
 // PUT: Update menu item
 elseif ($method === 'PUT' && $action === 'update-menu-item' && isset($_GET['item_id'])) {
+    checkPermission('edit_menu', $auth, $db);
+    
     $itemId = intval($_GET['item_id']);
     $data = json_decode(file_get_contents('php://input'), true);
     
@@ -378,6 +450,8 @@ elseif ($method === 'PUT' && $action === 'update-menu-item' && isset($_GET['item
 
 // DELETE: Delete menu item
 elseif ($method === 'DELETE' && $action === 'delete-menu-item' && isset($_GET['item_id'])) {
+    checkPermission('edit_menu', $auth, $db);
+    
     $itemId = intval($_GET['item_id']);
     $stmt = $conn->prepare("DELETE FROM menu_items WHERE id = :id");
     $stmt->execute([':id' => $itemId]);
@@ -390,6 +464,8 @@ elseif ($method === 'DELETE' && $action === 'delete-menu-item' && isset($_GET['i
 
 // GET: All quick orders for a merchant
 elseif ($method === 'GET' && $merchantId && $action === 'quick-orders') {
+    checkPermission('view_quick_orders', $auth, $db);
+    
     $stmt = $conn->prepare("
         SELECT qo.*,
             (SELECT COUNT(*) FROM quick_order_items WHERE quick_order_id = qo.id) as total_items
@@ -408,6 +484,8 @@ elseif ($method === 'GET' && $merchantId && $action === 'quick-orders') {
 
 // GET: Single quick order
 elseif ($method === 'GET' && $action === 'quick-order' && isset($_GET['quick_order_id'])) {
+    checkPermission('view_quick_orders', $auth, $db);
+    
     $quickOrderId = intval($_GET['quick_order_id']);
     $stmt = $conn->prepare("SELECT * FROM quick_orders WHERE id = :id");
     $stmt->execute([':id' => $quickOrderId]);
@@ -422,6 +500,8 @@ elseif ($method === 'GET' && $action === 'quick-order' && isset($_GET['quick_ord
 
 // POST: Create quick order
 elseif ($method === 'POST' && $action === 'create-quick-order') {
+    checkPermission('edit_quick_orders', $auth, $db);
+    
     $data = json_decode(file_get_contents('php://input'), true);
     
     $required = ['merchant_id', 'title', 'price'];
@@ -458,6 +538,8 @@ elseif ($method === 'POST' && $action === 'create-quick-order') {
 
 // PUT: Update quick order
 elseif ($method === 'PUT' && $action === 'update-quick-order' && isset($_GET['quick_order_id'])) {
+    checkPermission('edit_quick_orders', $auth, $db);
+    
     $quickOrderId = intval($_GET['quick_order_id']);
     $data = json_decode(file_get_contents('php://input'), true);
     
@@ -486,6 +568,8 @@ elseif ($method === 'PUT' && $action === 'update-quick-order' && isset($_GET['qu
 
 // DELETE: Delete quick order
 elseif ($method === 'DELETE' && $action === 'delete-quick-order' && isset($_GET['quick_order_id'])) {
+    checkPermission('edit_quick_orders', $auth, $db);
+    
     $quickOrderId = intval($_GET['quick_order_id']);
     $stmt = $conn->prepare("DELETE FROM quick_orders WHERE id = :id");
     $stmt->execute([':id' => $quickOrderId]);
@@ -498,6 +582,8 @@ elseif ($method === 'DELETE' && $action === 'delete-quick-order' && isset($_GET[
 
 // GET: All ads
 elseif ($method === 'GET' && $action === 'ads') {
+    checkPermission('view_ads', $auth, $db);
+    
     $merchantFilter = isset($_GET['merchant_id']) ? intval($_GET['merchant_id']) : null;
     
     $sql = "SELECT a.*, m.name as merchant_name 
@@ -535,6 +621,8 @@ elseif ($method === 'GET' && $action === 'ads') {
 
 // GET: Ads for specific merchant
 elseif ($method === 'GET' && $merchantId && $action === 'merchant-ads') {
+    checkPermission('view_ads', $auth, $db);
+    
     $stmt = $conn->prepare("
         SELECT * FROM ad_photos 
         WHERE merchant_id = :merchant_id 
@@ -558,6 +646,8 @@ elseif ($method === 'GET' && $merchantId && $action === 'merchant-ads') {
 
 // POST: Create ad
 elseif ($method === 'POST' && $action === 'create-ad') {
+    checkPermission('edit_ads', $auth, $db);
+    
     $data = json_decode(file_get_contents('php://input'), true);
     
     if (empty($data['photo_path'])) {
@@ -581,6 +671,8 @@ elseif ($method === 'POST' && $action === 'create-ad') {
 
 // DELETE: Delete ad
 elseif ($method === 'DELETE' && $action === 'delete-ad' && isset($_GET['ad_id'])) {
+    checkPermission('edit_ads', $auth, $db);
+    
     $adId = intval($_GET['ad_id']);
     $stmt = $conn->prepare("DELETE FROM ad_photos WHERE id = :id");
     $stmt->execute([':id' => $adId]);
@@ -593,6 +685,7 @@ elseif ($method === 'DELETE' && $action === 'delete-ad' && isset($_GET['ad_id'])
 
 // GET: All merchant categories
 elseif ($method === 'GET' && $action === 'categories') {
+    // No permission check - categories are public data
     $stmt = $conn->query("
         SELECT DISTINCT category, COUNT(*) as merchant_count 
         FROM merchants 
@@ -611,6 +704,8 @@ elseif ($method === 'GET' && $action === 'categories') {
 
 // GET: Reviews for a merchant
 elseif ($method === 'GET' && $merchantId && $action === 'reviews') {
+    checkPermission('view_reviews', $auth, $db);
+    
     $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
     $limit = isset($_GET['limit']) ? min(50, max(1, intval($_GET['limit']))) : 20;
     $offset = ($page - 1) * $limit;
@@ -652,6 +747,8 @@ elseif ($method === 'GET' && $merchantId && $action === 'reviews') {
 
 // GET: Orders for a merchant
 elseif ($method === 'GET' && $merchantId && $action === 'orders') {
+    checkPermission('view_orders', $auth, $db);
+    
     $status = isset($_GET['status']) ? $_GET['status'] : '';
     $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
     $limit = isset($_GET['limit']) ? min(50, max(1, intval($_GET['limit']))) : 20;
@@ -707,6 +804,11 @@ elseif ($method === 'GET' && $merchantId && $action === 'orders') {
 
 // GET: Dashboard statistics
 elseif ($method === 'GET' && $action === 'stats') {
+    // Only super_admin and operations_admin can view full stats
+    if ($admin['role'] !== 'super_admin' && $admin['role'] !== 'operations_admin') {
+        checkPermission('view_stats', $auth, $db);
+    }
+    
     $stats = [];
     
     // Total merchants
@@ -753,13 +855,111 @@ elseif ($method === 'GET' && $action === 'stats') {
     $stmt = $conn->query("SELECT COUNT(*) FROM merchants WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)");
     $stats['new_merchants_week'] = intval($stmt->fetchColumn());
     
-    $db->sendResponse(['stats' => $stats]);
+    // Top 5 merchants by revenue
+    $stmt = $conn->query("
+        SELECT m.id, m.name, COALESCE(SUM(o.total_amount), 0) as revenue
+        FROM merchants m
+        LEFT JOIN orders o ON m.id = o.merchant_id AND o.status = 'completed'
+        GROUP BY m.id
+        ORDER BY revenue DESC
+        LIMIT 5
+    ");
+    $stats['top_merchants'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    $db->sendResponse([
+        'stats' => $stats,
+        'admin' => [
+            'role' => $admin['role'],
+            'name' => $admin['full_name']
+        ]
+    ]);
+}
+
+// =============================================
+// 9. BULK OPERATIONS
+// =============================================
+
+// POST: Bulk update merchant status
+elseif ($method === 'POST' && $action === 'bulk-status') {
+    checkPermission('edit_merchants', $auth, $db);
+    
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    if (empty($data['merchant_ids']) || !is_array($data['merchant_ids'])) {
+        $db->sendError('merchant_ids array is required', 400);
+    }
+    
+    if (!isset($data['is_active'])) {
+        $db->sendError('is_active field is required', 400);
+    }
+    
+    $ids = array_map('intval', $data['merchant_ids']);
+    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+    $isActive = intval($data['is_active']);
+    
+    $stmt = $conn->prepare("UPDATE merchants SET is_active = ?, updated_at = NOW() WHERE id IN ($placeholders)");
+    $params = array_merge([$isActive], $ids);
+    $stmt->execute($params);
+    
+    $affected = $stmt->rowCount();
+    
+    $db->sendResponse([
+        'updated_count' => $affected,
+        'status' => $isActive ? 'activated' : 'deactivated'
+    ], "$affected merchant(s) updated");
+}
+
+// POST: Bulk delete merchants
+elseif ($method === 'POST' && $action === 'bulk-delete') {
+    checkPermission('delete_merchants', $auth, $db);
+    
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    if (empty($data['merchant_ids']) || !is_array($data['merchant_ids'])) {
+        $db->sendError('merchant_ids array is required', 400);
+    }
+    
+    $ids = array_map('intval', $data['merchant_ids']);
+    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+    
+    // Check which merchants have orders
+    $checkStmt = $conn->prepare("SELECT id FROM orders WHERE merchant_id IN ($placeholders)");
+    $checkStmt->execute($ids);
+    $merchantsWithOrders = $checkStmt->fetchAll(PDO::FETCH_COLUMN);
+    
+    if (!empty($merchantsWithOrders)) {
+        // Soft delete for those with orders
+        $softIds = array_intersect($ids, $merchantsWithOrders);
+        if (!empty($softIds)) {
+            $softPlaceholders = implode(',', array_fill(0, count($softIds), '?'));
+            $softStmt = $conn->prepare("UPDATE merchants SET is_active = 0, updated_at = NOW() WHERE id IN ($softPlaceholders)");
+            $softStmt->execute($softIds);
+        }
+        
+        // Hard delete for those without orders
+        $hardIds = array_diff($ids, $merchantsWithOrders);
+        if (!empty($hardIds)) {
+            $hardPlaceholders = implode(',', array_fill(0, count($hardIds), '?'));
+            $hardStmt = $conn->prepare("DELETE FROM merchants WHERE id IN ($hardPlaceholders)");
+            $hardStmt->execute($hardIds);
+        }
+        
+        $db->sendResponse([
+            'soft_deleted' => count($softIds),
+            'hard_deleted' => count($hardIds)
+        ], 'Bulk delete completed');
+    } else {
+        // Hard delete all
+        $stmt = $conn->prepare("DELETE FROM merchants WHERE id IN ($placeholders)");
+        $stmt->execute($ids);
+        $db->sendResponse(['deleted_count' => $stmt->rowCount()], 'Merchants deleted');
+    }
 }
 
 // =============================================
 // Invalid action handler
 // =============================================
 else {
-    $db->sendError('Invalid action. Available actions: list, details, create, update, delete, toggle-status, menu-items, menu-item, create-menu-item, update-menu-item, delete-menu-item, quick-orders, quick-order, create-quick-order, update-quick-order, delete-quick-order, ads, merchant-ads, create-ad, delete-ad, categories, reviews, orders, stats', 400);
+    $db->sendError('Invalid action. Available actions: list, details, create, update, delete, toggle-status, menu-items, menu-item, create-menu-item, update-menu-item, delete-menu-item, quick-orders, quick-order, create-quick-order, update-quick-order, delete-quick-order, ads, merchant-ads, create-ad, delete-ad, categories, reviews, orders, stats, bulk-status, bulk-delete', 400);
 }
 ?>
