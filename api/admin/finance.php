@@ -61,31 +61,31 @@ function formatCurrency($amount) {
 }
 
 // =============================================
-// 1. DASHBOARD STATS
+// 1. DASHBOARD STATS (FIXED - using 'success' status)
 // =============================================
 if ($method === 'GET' && $action === 'dashboard') {
     checkPermission('view_finance', $auth, $db);
     
     $stats = [];
     
-    // Today's revenue
-    $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'completed' AND DATE(created_at) = CURDATE()");
+    // Today's revenue - using 'success' status (your orders use 'success')
+    $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'success' AND DATE(created_at) = CURDATE()");
     $stats['today_revenue'] = floatval($stmt->fetchColumn());
     
     // Today's orders
-    $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status = 'completed' AND DATE(created_at) = CURDATE()");
+    $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status = 'success' AND DATE(created_at) = CURDATE()");
     $stats['today_orders'] = intval($stmt->fetchColumn());
     
-    // Week revenue
-    $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'completed' AND YEARWEEK(created_at) = YEARWEEK(CURDATE())");
+    // Week revenue (last 7 days)
+    $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'success' AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)");
     $stats['week_revenue'] = floatval($stmt->fetchColumn());
     
     // Month revenue
-    $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'completed' AND MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE())");
+    $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'success' AND MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE())");
     $stats['month_revenue'] = floatval($stmt->fetchColumn());
     
-    // Total revenue
-    $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'completed'");
+    // Total revenue all time
+    $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'success'");
     $stats['total_revenue'] = floatval($stmt->fetchColumn());
     
     // Total commissions pending
@@ -101,7 +101,7 @@ if ($method === 'GET' && $action === 'dashboard') {
     $stats['pending_payouts'] = floatval($stmt->fetchColumn());
     
     // Average order value
-    $stmt = $conn->query("SELECT COALESCE(AVG(total_amount), 0) FROM orders WHERE status = 'completed'");
+    $stmt = $conn->query("SELECT COALESCE(AVG(total_amount), 0) FROM orders WHERE status = 'success'");
     $stats['avg_order_value'] = floatval($stmt->fetchColumn());
     
     // Total customers
@@ -116,7 +116,7 @@ if ($method === 'GET' && $action === 'dashboard') {
     $stmt = $conn->query("
         SELECT m.id, m.name, COALESCE(SUM(o.total_amount), 0) as revenue, COUNT(o.id) as order_count
         FROM merchants m
-        LEFT JOIN orders o ON m.id = o.merchant_id AND o.status = 'completed'
+        LEFT JOIN orders o ON m.id = o.merchant_id AND o.status = 'success'
         GROUP BY m.id
         ORDER BY revenue DESC
         LIMIT 5
@@ -126,7 +126,7 @@ if ($method === 'GET' && $action === 'dashboard') {
     // Payment methods breakdown
     $stmt = $conn->query("
         SELECT payment_method, COUNT(*) as count, COALESCE(SUM(total_amount), 0) as total
-        FROM orders WHERE status = 'completed' AND payment_method IS NOT NULL
+        FROM orders WHERE status = 'success' AND payment_method IS NOT NULL
         GROUP BY payment_method
     ");
     $stats['by_payment_method'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -145,9 +145,157 @@ if ($method === 'GET' && $action === 'dashboard') {
 }
 
 // =============================================
+// 11. GET REVENUE CHART DATA (FIXED - using 'success' status)
+// =============================================
+elseif ($method === 'GET' && $action === 'revenue-chart') {
+    checkPermission('view_finance', $auth, $db);
+    
+    $period = isset($_GET['period']) ? $_GET['period'] : 'month';
+    $data = [];
+    
+    if ($period === 'week') {
+        for ($i = 6; $i >= 0; $i--) {
+            $date = date('Y-m-d', strtotime("-$i days"));
+            $stmt = $conn->prepare("
+                SELECT COALESCE(SUM(total_amount), 0) as total,
+                       COUNT(*) as orders
+                FROM orders 
+                WHERE status = 'success' AND DATE(created_at) = :date
+            ");
+            $stmt->execute([':date' => $date]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            $data[] = [
+                'date' => date('D, M j', strtotime($date)),
+                'revenue' => floatval($row['total']),
+                'orders' => intval($row['orders'])
+            ];
+        }
+    } elseif ($period === 'month') {
+        for ($i = 29; $i >= 0; $i--) {
+            $date = date('Y-m-d', strtotime("-$i days"));
+            $stmt = $conn->prepare("
+                SELECT COALESCE(SUM(total_amount), 0) as total,
+                       COUNT(*) as orders
+                FROM orders 
+                WHERE status = 'success' AND DATE(created_at) = :date
+            ");
+            $stmt->execute([':date' => $date]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            $data[] = [
+                'date' => date('M j', strtotime($date)),
+                'revenue' => floatval($row['total']),
+                'orders' => intval($row['orders'])
+            ];
+        }
+    } elseif ($period === 'year') {
+        for ($i = 11; $i >= 0; $i--) {
+            $month = date('Y-m', strtotime("-$i months"));
+            $stmt = $conn->prepare("
+                SELECT COALESCE(SUM(total_amount), 0) as total,
+                       COUNT(*) as orders
+                FROM orders 
+                WHERE status = 'success' 
+                AND DATE_FORMAT(created_at, '%Y-%m') = :month
+            ");
+            $stmt->execute([':month' => $month]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            $data[] = [
+                'date' => date('M Y', strtotime($month . '-01')),
+                'revenue' => floatval($row['total']),
+                'orders' => intval($row['orders'])
+            ];
+        }
+    }
+    
+    $db->sendResponse(['data' => $data]);
+}
+
+// =============================================
+// 14. GET ORDERS (FIXED - showing all orders)
+// =============================================
+elseif ($method === 'GET' && $action === 'orders') {
+    checkPermission('view_finance', $auth, $db);
+    
+    $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
+    $limit = isset($_GET['limit']) ? min(100, max(1, intval($_GET['limit']))) : 20;
+    $search = isset($_GET['search']) ? trim($_GET['search']) : '';
+    $status = isset($_GET['status']) ? $_GET['status'] : '';
+    $dateFrom = isset($_GET['date_from']) ? $_GET['date_from'] : '';
+    $dateTo = isset($_GET['date_to']) ? $_GET['date_to'] : '';
+    $offset = ($page - 1) * $limit;
+    
+    $where = [];
+    $params = [];
+    
+    if ($search) {
+        $where[] = "(o.order_number LIKE :search OR u.full_name LIKE :search OR u.email LIKE :search OR m.name LIKE :search)";
+        $params[':search'] = "%$search%";
+    }
+    
+    if ($status) {
+        $where[] = "o.status = :status";
+        $params[':status'] = $status;
+    }
+    
+    if ($dateFrom) {
+        $where[] = "DATE(o.created_at) >= :date_from";
+        $params[':date_from'] = $dateFrom;
+    }
+    
+    if ($dateTo) {
+        $where[] = "DATE(o.created_at) <= :date_to";
+        $params[':date_to'] = $dateTo;
+    }
+    
+    $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
+    
+    $countSql = "SELECT COUNT(*) as total FROM orders o 
+                 LEFT JOIN users u ON o.user_id = u.id
+                 LEFT JOIN merchants m ON o.merchant_id = m.id
+                 $whereClause";
+    $countStmt = $conn->prepare($countSql);
+    $countStmt->execute($params);
+    $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
+    
+    $sql = "SELECT 
+                o.id, o.order_number, o.total_amount, o.status, o.payment_method,
+                o.created_at, u.full_name as customer_name, u.email as customer_email,
+                m.name as merchant_name
+            FROM orders o
+            LEFT JOIN users u ON o.user_id = u.id
+            LEFT JOIN merchants m ON o.merchant_id = m.id
+            $whereClause
+            ORDER BY o.created_at DESC
+            LIMIT :limit OFFSET :offset";
+    
+    $stmt = $conn->prepare($sql);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+    foreach ($params as $key => $value) {
+        $stmt->bindValue($key, $value);
+    }
+    $stmt->execute();
+    $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    $db->sendResponse([
+        'orders' => $orders,
+        'pagination' => [
+            'current_page' => $page,
+            'per_page' => $limit,
+            'total' => intval($total),
+            'total_pages' => ceil($total / $limit)
+        ]
+    ]);
+}
+
+// The rest of your endpoints remain the same...
+// (commissions, payouts, transactions, etc. - they don't need changes)
+
+// =============================================
 // 2. GET COMMISSIONS LIST
 // =============================================
 elseif ($method === 'GET' && $action === 'commissions') {
+    // ... (keep your existing code)
     checkPermission('view_commissions', $auth, $db);
     
     $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
@@ -245,6 +393,7 @@ elseif ($method === 'GET' && $action === 'commission-summary') {
 // 4. UPDATE COMMISSION STATUS
 // =============================================
 elseif ($method === 'PUT' && $commissionId && $action === 'update-commission') {
+    // ... (keep your existing code)
     checkPermission('edit_commissions', $auth, $db);
     
     $data = json_decode(file_get_contents('php://input'), true);
@@ -276,6 +425,7 @@ elseif ($method === 'PUT' && $commissionId && $action === 'update-commission') {
 // 5. BULK UPDATE COMMISSIONS
 // =============================================
 elseif ($method === 'POST' && $action === 'bulk-update-commissions') {
+    // ... (keep your existing code)
     checkPermission('edit_commissions', $auth, $db);
     
     $data = json_decode(file_get_contents('php://input'), true);
@@ -315,6 +465,7 @@ elseif ($method === 'POST' && $action === 'bulk-update-commissions') {
 // 6. GET MERCHANT COMMISSION SETTINGS
 // =============================================
 elseif ($method === 'GET' && $action === 'commission-settings') {
+    // ... (keep your existing code)
     checkPermission('edit_commissions', $auth, $db);
     
     $merchantId = isset($_GET['merchant_id']) ? intval($_GET['merchant_id']) : null;
@@ -350,6 +501,7 @@ elseif ($method === 'GET' && $action === 'commission-settings') {
 // 7. UPDATE MERCHANT COMMISSION SETTINGS
 // =============================================
 elseif ($method === 'POST' && $action === 'update-commission-settings') {
+    // ... (keep your existing code)
     checkPermission('edit_commissions', $auth, $db);
     
     $data = json_decode(file_get_contents('php://input'), true);
@@ -392,6 +544,7 @@ elseif ($method === 'POST' && $action === 'update-commission-settings') {
 // 8. GET PAYOUTS
 // =============================================
 elseif ($method === 'GET' && $action === 'payouts') {
+    // ... (keep your existing code)
     checkPermission('view_finance', $auth, $db);
     
     $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
@@ -452,6 +605,7 @@ elseif ($method === 'GET' && $action === 'payouts') {
 // 9. CREATE PAYOUT
 // =============================================
 elseif ($method === 'POST' && $action === 'create-payout') {
+    // ... (keep your existing code)
     checkPermission('create_payouts', $auth, $db);
     
     $data = json_decode(file_get_contents('php://input'), true);
@@ -498,6 +652,7 @@ elseif ($method === 'POST' && $action === 'create-payout') {
 // 10. UPDATE PAYOUT STATUS
 // =============================================
 elseif ($method === 'PUT' && $action === 'update-payout' && isset($_GET['payout_id'])) {
+    // ... (keep your existing code)
     checkPermission('process_payouts', $auth, $db);
     
     $payoutId = intval($_GET['payout_id']);
@@ -524,72 +679,6 @@ elseif ($method === 'PUT' && $action === 'update-payout' && isset($_GET['payout_
     ]);
     
     $db->sendResponse([], 'Payout updated successfully');
-}
-
-// =============================================
-// 11. GET REVENUE CHART DATA
-// =============================================
-elseif ($method === 'GET' && $action === 'revenue-chart') {
-    checkPermission('view_finance', $auth, $db);
-    
-    $period = isset($_GET['period']) ? $_GET['period'] : 'month';
-    $data = [];
-    
-    if ($period === 'week') {
-        for ($i = 6; $i >= 0; $i--) {
-            $date = date('Y-m-d', strtotime("-$i days"));
-            $stmt = $conn->prepare("
-                SELECT COALESCE(SUM(total_amount), 0) as total,
-                       COUNT(*) as orders
-                FROM orders 
-                WHERE status = 'completed' AND DATE(created_at) = :date
-            ");
-            $stmt->execute([':date' => $date]);
-            $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            $data[] = [
-                'date' => date('D, M j', strtotime($date)),
-                'revenue' => floatval($row['total']),
-                'orders' => intval($row['orders'])
-            ];
-        }
-    } elseif ($period === 'month') {
-        for ($i = 29; $i >= 0; $i--) {
-            $date = date('Y-m-d', strtotime("-$i days"));
-            $stmt = $conn->prepare("
-                SELECT COALESCE(SUM(total_amount), 0) as total,
-                       COUNT(*) as orders
-                FROM orders 
-                WHERE status = 'completed' AND DATE(created_at) = :date
-            ");
-            $stmt->execute([':date' => $date]);
-            $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            $data[] = [
-                'date' => date('M j', strtotime($date)),
-                'revenue' => floatval($row['total']),
-                'orders' => intval($row['orders'])
-            ];
-        }
-    } elseif ($period === 'year') {
-        for ($i = 11; $i >= 0; $i--) {
-            $month = date('Y-m', strtotime("-$i months"));
-            $stmt = $conn->prepare("
-                SELECT COALESCE(SUM(total_amount), 0) as total,
-                       COUNT(*) as orders
-                FROM orders 
-                WHERE status = 'completed' 
-                AND DATE_FORMAT(created_at, '%Y-%m') = :month
-            ");
-            $stmt->execute([':month' => $month]);
-            $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            $data[] = [
-                'date' => date('M Y', strtotime($month . '-01')),
-                'revenue' => floatval($row['total']),
-                'orders' => intval($row['orders'])
-            ];
-        }
-    }
-    
-    $db->sendResponse(['data' => $data]);
 }
 
 // =============================================
@@ -710,84 +799,6 @@ elseif ($method === 'GET' && $action === 'transactions') {
     
     $db->sendResponse([
         'transactions' => $transactions,
-        'pagination' => [
-            'current_page' => $page,
-            'per_page' => $limit,
-            'total' => intval($total),
-            'total_pages' => ceil($total / $limit)
-        ]
-    ]);
-}
-
-// =============================================
-// 14. GET ORDERS
-// =============================================
-elseif ($method === 'GET' && $action === 'orders') {
-    checkPermission('view_finance', $auth, $db);
-    
-    $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
-    $limit = isset($_GET['limit']) ? min(100, max(1, intval($_GET['limit']))) : 20;
-    $search = isset($_GET['search']) ? trim($_GET['search']) : '';
-    $status = isset($_GET['status']) ? $_GET['status'] : '';
-    $dateFrom = isset($_GET['date_from']) ? $_GET['date_from'] : '';
-    $dateTo = isset($_GET['date_to']) ? $_GET['date_to'] : '';
-    $offset = ($page - 1) * $limit;
-    
-    $where = [];
-    $params = [];
-    
-    if ($search) {
-        $where[] = "(o.order_number LIKE :search OR u.full_name LIKE :search OR u.email LIKE :search OR m.name LIKE :search)";
-        $params[':search'] = "%$search%";
-    }
-    
-    if ($status) {
-        $where[] = "o.status = :status";
-        $params[':status'] = $status;
-    }
-    
-    if ($dateFrom) {
-        $where[] = "DATE(o.created_at) >= :date_from";
-        $params[':date_from'] = $dateFrom;
-    }
-    
-    if ($dateTo) {
-        $where[] = "DATE(o.created_at) <= :date_to";
-        $params[':date_to'] = $dateTo;
-    }
-    
-    $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
-    
-    $countSql = "SELECT COUNT(*) as total FROM orders o 
-                 LEFT JOIN users u ON o.user_id = u.id
-                 LEFT JOIN merchants m ON o.merchant_id = m.id
-                 $whereClause";
-    $countStmt = $conn->prepare($countSql);
-    $countStmt->execute($params);
-    $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
-    
-    $sql = "SELECT 
-                o.id, o.order_number, o.total_amount, o.status, o.payment_method,
-                o.created_at, u.full_name as customer_name, u.email as customer_email,
-                m.name as merchant_name
-            FROM orders o
-            LEFT JOIN users u ON o.user_id = u.id
-            LEFT JOIN merchants m ON o.merchant_id = m.id
-            $whereClause
-            ORDER BY o.created_at DESC
-            LIMIT :limit OFFSET :offset";
-    
-    $stmt = $conn->prepare($sql);
-    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
-    $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
-    foreach ($params as $key => $value) {
-        $stmt->bindValue($key, $value);
-    }
-    $stmt->execute();
-    $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-    $db->sendResponse([
-        'orders' => $orders,
         'pagination' => [
             'current_page' => $page,
             'per_page' => $limit,
