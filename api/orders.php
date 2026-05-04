@@ -42,7 +42,7 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-$baseUrl = "https://dropx13-production.up.railway.app";
+$baseUrl = "https://dropx14-production.up.railway.app";
 
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../includes/ResponseHandler.php';

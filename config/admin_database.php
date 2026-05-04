@@ -17,11 +17,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 class AdminDatabase {
-    private $host = 'junction.proxy.rlwy.net';
-    private $port = '56926';
+    private $host = 'gondola.proxy.rlwy.net';
+    private $port = '55044';
     private $db_name = 'railway';
     private $username = 'root';
-    private $password = 'CFPzQklmiZSraQspaGIWpaQttVFUsrrN';
+    private $password = 'qOYXxUjShAymTErsDLsAixdxzyLIgCMl';
     public $conn;
     
     private static $instance = null;

@@ -24,7 +24,7 @@ if (!$admin) {
 $method = $_SERVER['REQUEST_METHOD'];
 $action = isset($_GET['action']) ? $_GET['action'] : '';
 $merchantId = isset($_GET['id']) ? intval($_GET['id']) : null;
-$baseUrl = "https://dropx13-production.up.railway.app";
+$baseUrl = "https://dropx14-production.up.railway.app";
 
 // Create upload directories if they don't exist
 $uploadBaseDir = __DIR__ . '/../../uploads/';
