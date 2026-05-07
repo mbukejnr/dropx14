@@ -1,20 +1,11 @@
 <?php
 // backend/api/admin/customer.php
-// COMPLETE ADMIN CUSTOMER MANAGEMENT API - FULLY FIXED
+// COMPLETE ADMIN CUSTOMER MANAGEMENT API - FOLLOWS SAME PATTERN AS admin_management.php
 
 // =============================================
-// SUPPRESS WARNINGS FOR CLEAN JSON OUTPUT
+// CORS HEADERS - MUST BE FIRST (SAME AS admin_management.php)
 // =============================================
-error_reporting(E_ERROR | E_PARSE);
-ini_set('display_errors', 0);
-
-// =============================================
-// CORS CONFIGURATION
-// =============================================
-$production_frontend = getenv('FRONTEND_URL') ?: 'https://frontend-pink-pi-70.vercel.app';
-
 $allowed_origins = [
-    $production_frontend,
     'https://frontend-pink-pi-70.vercel.app',
     'http://localhost:3000',
     'http://localhost:3001',
@@ -35,18 +26,24 @@ header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-W
 header("Access-Control-Expose-Headers: Content-Disposition");
 header("Content-Type: application/json; charset=UTF-8");
 
+// Handle preflight OPTIONS request
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
 
+// =============================================
+// REQUIRE AUTH FILES
+// =============================================
 require_once __DIR__ . '/../../config/admin_database.php';
 require_once __DIR__ . '/../../includes/admin_auth.php';
 
+// Initialize database and auth
 $db = AdminDatabase::getInstance();
 $conn = $db->getConnection();
 $auth = new AdminAuth();
 
+// Verify admin is logged in and get admin data
 $admin = $auth->validateToken();
 
 if (!$admin) {
@@ -57,12 +54,18 @@ $method = $_SERVER['REQUEST_METHOD'];
 $action = isset($_GET['action']) ? $_GET['action'] : '';
 $customerId = isset($_GET['id']) ? intval($_GET['id']) : null;
 
+// =============================================
+// PERMISSION CHECK FUNCTION
+// =============================================
 function checkPermission($permission, $auth, $db) {
     if (!$auth->hasPermission($permission)) {
         $db->sendForbidden("You don't have permission to perform this action. Required: $permission");
     }
 }
 
+// =============================================
+// FORMAT CUSTOMER DATA FUNCTION
+// =============================================
 function formatCustomerData($customer) {
     return [
         'id' => $customer['id'],
@@ -119,11 +122,13 @@ if ($method === 'GET' && $action === 'list') {
     
     $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
     
+    // Get total count
     $countSql = "SELECT COUNT(*) as total FROM users u $whereClause";
     $countStmt = $conn->prepare($countSql);
     $countStmt->execute($params);
     $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
     
+    // Get customers with stats
     $sql = "SELECT 
                 u.*,
                 (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as order_count,
@@ -187,7 +192,7 @@ elseif ($method === 'GET' && $customerId && $action === 'details') {
 }
 
 // =============================================
-// 3. CREATE NEW CUSTOMER (ADD) - FIXED
+// 3. CREATE NEW CUSTOMER (ADD)
 // =============================================
 elseif ($method === 'POST' && $action === 'create') {
     checkPermission('create_customers', $auth, $db);
@@ -202,54 +207,33 @@ elseif ($method === 'POST' && $action === 'create') {
         }
     }
     
-    // Validate email format
-    if (!empty($data['email']) && !filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
+    // Validate email
+    if (!filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
         $db->sendError('Invalid email format', 400);
     }
     
     // Check if email exists
-    if (!empty($data['email'])) {
-        $checkEmail = $conn->prepare("SELECT id FROM users WHERE email = :email");
-        $checkEmail->execute([':email' => $data['email']]);
-        if ($checkEmail->fetch()) {
-            $db->sendError('Email already exists', 400);
-        }
+    $checkEmail = $conn->prepare("SELECT id FROM users WHERE email = :email");
+    $checkEmail->execute([':email' => $data['email']]);
+    if ($checkEmail->fetch()) {
+        $db->sendError('Email already exists', 400);
     }
     
     // Check if phone exists
-    if (!empty($data['phone'])) {
-        $checkPhone = $conn->prepare("SELECT id FROM users WHERE phone = :phone");
-        $checkPhone->execute([':phone' => $data['phone']]);
-        if ($checkPhone->fetch()) {
-            $db->sendError('Phone number already exists', 400);
-        }
+    $checkPhone = $conn->prepare("SELECT id FROM users WHERE phone = :phone");
+    $checkPhone->execute([':phone' => $data['phone']]);
+    if ($checkPhone->fetch()) {
+        $db->sendError('Phone number already exists', 400);
     }
     
-    // Generate password
+    // Generate password if not provided
     $password = !empty($data['password']) ? $data['password'] : bin2hex(random_bytes(4));
     $hashedPassword = password_hash($password, PASSWORD_DEFAULT);
     
     // Insert new customer
     $stmt = $conn->prepare("
-        INSERT INTO users (
-            full_name, 
-            email, 
-            phone, 
-            password, 
-            created_at, 
-            updated_at,
-            is_active,
-            verified
-        ) VALUES (
-            :full_name, 
-            :email, 
-            :phone, 
-            :password, 
-            NOW(), 
-            NOW(),
-            1,
-            1
-        )
+        INSERT INTO users (full_name, email, phone, password, is_active, created_at, updated_at)
+        VALUES (:full_name, :email, :phone, :password, 1, NOW(), NOW())
     ");
     
     $stmt->execute([
@@ -261,19 +245,15 @@ elseif ($method === 'POST' && $action === 'create') {
     
     $newCustomerId = $conn->lastInsertId();
     
-    // Try to create wallet (if table exists)
+    // Create wallet for new customer (if wallets table exists)
     try {
-        $checkWalletTable = $conn->query("SHOW TABLES LIKE 'dropx_wallets'");
-        if ($checkWalletTable->rowCount() > 0) {
-            $walletStmt = $conn->prepare("
-                INSERT INTO dropx_wallets (user_id, balance, currency, is_active, created_at, updated_at)
-                VALUES (:user_id, 0, 'MWK', 1, NOW(), NOW())
-            ");
-            $walletStmt->execute([':user_id' => $newCustomerId]);
-        }
-    } catch (Exception $e) {
-        // Wallet table doesn't exist - not critical
-        error_log("Wallet creation skipped: " . $e->getMessage());
+        $walletStmt = $conn->prepare("
+            INSERT INTO dropx_wallets (user_id, balance, currency, is_active, created_at, updated_at)
+            VALUES (:user_id, 0, 'MWK', 1, NOW(), NOW())
+        ");
+        $walletStmt->execute([':user_id' => $newCustomerId]);
+    } catch (PDOException $e) {
+        // Wallet table might not exist - that's fine
     }
     
     $db->sendResponse([
@@ -293,10 +273,7 @@ elseif ($method === 'PUT' && $customerId && $action === 'update') {
     $fields = [];
     $params = [':id' => $customerId];
     
-    $allowedFields = [
-        'full_name', 'email', 'phone', 'gender', 'avatar',
-        'member_level', 'member_points', 'is_active', 'verified'
-    ];
+    $allowedFields = ['full_name', 'email', 'phone', 'gender', 'avatar', 'is_active', 'verified'];
     
     foreach ($allowedFields as $field) {
         if (isset($data[$field])) {
@@ -305,6 +282,7 @@ elseif ($method === 'PUT' && $customerId && $action === 'update') {
         }
     }
     
+    // Handle password update
     if (isset($data['password']) && !empty($data['password'])) {
         $fields[] = "password = :password";
         $params[':password'] = password_hash($data['password'], PASSWORD_DEFAULT);
@@ -328,15 +306,18 @@ elseif ($method === 'PUT' && $customerId && $action === 'update') {
 elseif ($method === 'DELETE' && $customerId && $action === 'delete') {
     checkPermission('delete_customers', $auth, $db);
     
+    // Check if customer has orders
     $check = $conn->prepare("SELECT COUNT(*) FROM orders WHERE user_id = :id");
     $check->execute([':id' => $customerId]);
     $orderCount = $check->fetchColumn();
     
     if ($orderCount > 0) {
+        // Soft delete - just deactivate
         $stmt = $conn->prepare("UPDATE users SET is_active = 0, updated_at = NOW() WHERE id = :id");
         $stmt->execute([':id' => $customerId]);
         $db->sendResponse([], 'Customer deactivated successfully (has existing orders)');
     } else {
+        // Hard delete
         $stmt = $conn->prepare("DELETE FROM users WHERE id = :id");
         $stmt->execute([':id' => $customerId]);
         $db->sendResponse([], 'Customer deleted successfully');
@@ -591,7 +572,7 @@ elseif ($method === 'POST' && $action === 'bulk-status') {
 }
 
 // =============================================
-// 13. EXPORT CUSTOMERS TO CSV - FIXED FOR PHP 8.1+
+// 13. EXPORT CUSTOMERS TO CSV
 // =============================================
 elseif ($method === 'GET' && $action === 'export') {
     checkPermission('view_customers', $auth, $db);
@@ -644,14 +625,14 @@ elseif ($method === 'GET' && $action === 'export') {
     // Add UTF-8 BOM for proper Excel encoding
     fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
     
-    // Add CSV headers - FIXED: Added 5th parameter for escape character (PHP 8.1+)
+    // Add CSV headers
     fputcsv($output, [
         'ID', 'Full Name', 'Email', 'Phone', 'Gender',
         'Total Orders', 'Wallet Balance (MK)', 'Status',
         'Registered Date', 'Last Active'
     ], ',', '"', '\\');
     
-    // Add data rows - FIXED: Added 5th parameter for escape character (PHP 8.1+)
+    // Add data rows
     foreach ($customers as $customer) {
         // Format phone to avoid scientific notation
         $phone = $customer['phone'] ?? '';
