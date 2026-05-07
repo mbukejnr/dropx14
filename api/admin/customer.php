@@ -5,7 +5,7 @@
 // =============================================
 // CORS CONFIGURATION
 // =============================================
-$production_frontend = getenv('FRONTEND_URL') ?: 'https://frontend-gf0q7vyz3-mbukejnrs-projects.vercel.app';
+$production_frontend = getenv('FRONTEND_URL') ?: 'frontend-k2r04vyq2-mbukejnrs-projects.vercel.app';
 
 $allowed_origins = [
     $production_frontend,
