@@ -46,7 +46,6 @@ $auth = new AdminAuth();
 $admin = $auth->validateToken();
 
 if (!$admin) {
-    // Token validation failed - error already sent by validateToken
     exit();
 }
 
@@ -563,7 +562,7 @@ elseif ($method === 'POST' && $adminId && $action === 'reset-password') {
 }
 
 // =============================================
-// 13. EXPORT ADMINS TO CSV - FIXED
+// 13. EXPORT ADMINS TO CSV - FIXED FOR PHP 8.1+
 // =============================================
 elseif ($method === 'GET' && $action === 'export') {
     checkPermission('view_admins', $auth, $db);
@@ -587,7 +586,13 @@ elseif ($method === 'GET' && $action === 'export') {
     $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
     
     $sql = "SELECT 
-                id, full_name, email, phone, role, is_active, is_locked,
+                id, 
+                full_name, 
+                email, 
+                phone, 
+                role, 
+                is_active, 
+                is_locked,
                 DATE_FORMAT(created_at, '%Y-%m-%d') as created_date,
                 DATE_FORMAT(last_login, '%Y-%m-%d %H:%i') as last_login_date
             FROM admin_users u
@@ -600,6 +605,9 @@ elseif ($method === 'GET' && $action === 'export') {
     }
     $stmt->execute();
     $admins = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Turn off error reporting for CSV output to prevent warnings
+    error_reporting(0);
     
     // Clear any output buffers that might interfere with CSV download
     while (ob_get_level()) {
@@ -619,22 +627,28 @@ elseif ($method === 'GET' && $action === 'export') {
     // Add UTF-8 BOM for proper Excel encoding
     fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
     
-    // Add CSV headers
-    fputcsv($output, ['ID', 'Full Name', 'Email', 'Phone', 'Role', 'Status', 'Locked', 'Created Date', 'Last Login']);
+    // Add CSV headers - FIXED: Added 5th parameter for escape character (PHP 8.1+)
+    fputcsv($output, ['ID', 'Full Name', 'Email', 'Phone', 'Role', 'Status', 'Locked', 'Created Date', 'Last Login'], ',', '"', '\\');
     
-    // Add data rows
+    // Add data rows - FIXED: Added 5th parameter for escape character (PHP 8.1+)
     foreach ($admins as $adminUser) {
+        // Format phone to avoid scientific notation
+        $phone = $adminUser['phone'];
+        if (is_numeric($phone) && strlen($phone) > 10) {
+            $phone = "'" . $phone; // Add apostrophe to prevent Excel scientific notation
+        }
+        
         fputcsv($output, [
             $adminUser['id'],
             $adminUser['full_name'],
             $adminUser['email'],
-            $adminUser['phone'],
+            $phone,
             $adminUser['role'],
             $adminUser['is_active'] ? 'Active' : 'Inactive',
             $adminUser['is_locked'] ? 'Yes' : 'No',
             $adminUser['created_date'],
             $adminUser['last_login_date'] ?? 'Never'
-        ]);
+        ], ',', '"', '\\');
     }
     
     fclose($output);
