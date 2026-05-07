@@ -1,20 +1,12 @@
 <?php
-// backend/admin/config/admin_database.php
 // =============================================
 // ADMIN SYSTEM DATABASE CONFIGURATION
 // Using the same database as customer app
 // =============================================
 
-header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With');
-header('Access-Control-Allow-Credentials: true');
-
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
-    exit();
-}
+// !!! IMPORTANT !!!
+// NO HEADERS HERE - Headers are only sent by API endpoint files
+// This file is INCLUDED, not accessed directly
 
 class AdminDatabase {
     private $host = 'gondola.proxy.rlwy.net';
@@ -55,10 +47,13 @@ class AdminDatabase {
         return $this->conn;
     }
     
-    public function sendResponse($data, $statusCode = 200) {
-        http_response_code($statusCode);
+    public function sendResponse($data, $message = null, $statusCode = 200) {
+        if (!headers_sent()) {
+            http_response_code($statusCode);
+        }
         echo json_encode([
             'success' => true,
+            'message' => $message,
             'data' => $data,
             'timestamp' => date('Y-m-d H:i:s')
         ]);
@@ -66,7 +61,9 @@ class AdminDatabase {
     }
     
     public function sendError($message, $statusCode = 400, $errors = null) {
-        http_response_code($statusCode);
+        if (!headers_sent()) {
+            http_response_code($statusCode);
+        }
         echo json_encode([
             'success' => false,
             'message' => $message,
