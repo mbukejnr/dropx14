@@ -1,9 +1,38 @@
 <?php
 // backend/api/admin/admin_management.php
-// COMPLETE ADMIN MANAGEMENT API - FIXED AUTH
+// COMPLETE ADMIN MANAGEMENT API - WITH CORS FIX
 
 // =============================================
-// CORS & AUTH LOADING (EXACT MATCH TO merchants.php)
+// CORS HEADERS - MUST BE FIRST
+// =============================================
+$allowed_origins = [
+    'https://frontend-pink-pi-70.vercel.app',
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:5173'
+];
+
+$origin = isset($_SERVER['HTTP_ORIGIN']) ? $_SERVER['HTTP_ORIGIN'] : '';
+
+if (in_array($origin, $allowed_origins)) {
+    header("Access-Control-Allow-Origin: $origin");
+} else {
+    header("Access-Control-Allow-Origin: https://frontend-pink-pi-70.vercel.app");
+}
+
+header("Access-Control-Allow-Credentials: true");
+header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
+header("Content-Type: application/json; charset=UTF-8");
+
+// Handle preflight OPTIONS request
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
+
+// =============================================
+// REQUIRE AUTH FILES
 // =============================================
 require_once __DIR__ . '/../../config/admin_database.php';
 require_once __DIR__ . '/../../includes/admin_auth.php';
@@ -13,7 +42,7 @@ $db = AdminDatabase::getInstance();
 $conn = $db->getConnection();
 $auth = new AdminAuth();
 
-// Verify admin is logged in and get admin data (EXACT same as merchants.php)
+// Verify admin is logged in and get admin data
 $admin = $auth->validateToken();
 
 if (!$admin) {
