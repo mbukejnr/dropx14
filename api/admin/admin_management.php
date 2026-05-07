@@ -1,6 +1,6 @@
 <?php
 // backend/api/admin/admin_management.php
-// COMPLETE ADMIN MANAGEMENT API - WITH CORS FIX
+// COMPLETE ADMIN MANAGEMENT API - FULLY FIXED WITH CORS AND AUTH
 
 // =============================================
 // CORS HEADERS - MUST BE FIRST
@@ -23,7 +23,7 @@ if (in_array($origin, $allowed_origins)) {
 header("Access-Control-Allow-Credentials: true");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
-header("Content-Type: application/json; charset=UTF-8");
+header("Access-Control-Expose-Headers: Content-Disposition");
 
 // Handle preflight OPTIONS request
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -46,6 +46,7 @@ $auth = new AdminAuth();
 $admin = $auth->validateToken();
 
 if (!$admin) {
+    // Token validation failed - error already sent by validateToken
     exit();
 }
 
@@ -562,7 +563,7 @@ elseif ($method === 'POST' && $adminId && $action === 'reset-password') {
 }
 
 // =============================================
-// 13. EXPORT ADMINS TO CSV
+// 13. EXPORT ADMINS TO CSV - FIXED
 // =============================================
 elseif ($method === 'GET' && $action === 'export') {
     checkPermission('view_admins', $auth, $db);
@@ -600,14 +601,28 @@ elseif ($method === 'GET' && $action === 'export') {
     $stmt->execute();
     $admins = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    header('Content-Type: text/csv');
-    header('Content-Disposition: attachment; filename="admins_' . date('Y-m-d') . '.csv"');
+    // Clear any output buffers that might interfere with CSV download
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
     
+    // Set CSV headers for download
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="admins_export_' . date('Y-m-d_His') . '.csv"');
+    header('Cache-Control: must-revalidate, post-check=0, pre-check=0');
+    header('Expires: 0');
+    header('Pragma: public');
+    
+    // Create output stream
     $output = fopen('php://output', 'w');
+    
+    // Add UTF-8 BOM for proper Excel encoding
     fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
     
+    // Add CSV headers
     fputcsv($output, ['ID', 'Full Name', 'Email', 'Phone', 'Role', 'Status', 'Locked', 'Created Date', 'Last Login']);
     
+    // Add data rows
     foreach ($admins as $adminUser) {
         fputcsv($output, [
             $adminUser['id'],
@@ -627,9 +642,71 @@ elseif ($method === 'GET' && $action === 'export') {
 }
 
 // =============================================
+// 14. GET CURRENT ADMIN PROFILE
+// =============================================
+elseif ($method === 'GET' && $action === 'profile') {
+    $stmt = $conn->prepare("SELECT * FROM admin_users WHERE id = :id");
+    $stmt->execute([':id' => $admin['id']]);
+    $currentUser = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$currentUser) {
+        $db->sendError('Admin not found', 404);
+    }
+    
+    $db->sendResponse([
+        'admin' => formatAdminData($currentUser)
+    ]);
+}
+
+// =============================================
+// 15. UPDATE CURRENT ADMIN PROFILE
+// =============================================
+elseif ($method === 'PUT' && $action === 'update-profile') {
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    $fields = [];
+    $params = [':id' => $admin['id']];
+    
+    $allowedFields = ['full_name', 'phone'];
+    
+    foreach ($allowedFields as $field) {
+        if (isset($data[$field])) {
+            $fields[] = "$field = :$field";
+            $params[":$field"] = $data[$field];
+        }
+    }
+    
+    // Handle password update
+    if (isset($data['current_password']) && isset($data['new_password'])) {
+        // Verify current password
+        $stmt = $conn->prepare("SELECT password_hash FROM admin_users WHERE id = :id");
+        $stmt->execute([':id' => $admin['id']]);
+        $adminData = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!password_verify($data['current_password'], $adminData['password_hash'])) {
+            $db->sendError('Current password is incorrect', 400);
+        }
+        
+        $fields[] = "password_hash = :password";
+        $params[':password'] = password_hash($data['new_password'], PASSWORD_DEFAULT);
+    }
+    
+    if (empty($fields)) {
+        $db->sendError('No fields to update', 400);
+    }
+    
+    $fields[] = "updated_at = NOW()";
+    $sql = "UPDATE admin_users SET " . implode(', ', $fields) . " WHERE id = :id";
+    $stmt = $conn->prepare($sql);
+    $stmt->execute($params);
+    
+    $db->sendResponse([], 'Profile updated successfully');
+}
+
+// =============================================
 // Invalid action handler
 // =============================================
 else {
-    $db->sendError('Invalid action. Available actions: list, details, create, update, delete, toggle-status, toggle-lock, sessions, revoke-session, stats, bulk-status, reset-password, export', 400);
+    $db->sendError('Invalid action. Available actions: list, details, create, update, delete, toggle-status, toggle-lock, sessions, revoke-session, stats, bulk-status, reset-password, export, profile, update-profile', 400);
 }
 ?>
