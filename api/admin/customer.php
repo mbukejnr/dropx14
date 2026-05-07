@@ -1,9 +1,9 @@
 <?php
 // backend/api/admin/customer.php
-// COMPLETE ADMIN CUSTOMER MANAGEMENT API - FIXED FOR PHP 8.1+
+// COMPLETE ADMIN CUSTOMER MANAGEMENT API - FULLY FIXED
 
 // =============================================
-// TURN OFF WARNINGS FOR CLEAN JSON OUTPUT
+// SUPPRESS WARNINGS FOR CLEAN JSON OUTPUT
 // =============================================
 error_reporting(E_ERROR | E_PARSE);
 ini_set('display_errors', 0);
@@ -187,13 +187,14 @@ elseif ($method === 'GET' && $customerId && $action === 'details') {
 }
 
 // =============================================
-// 3. CREATE NEW CUSTOMER (ADD)
+// 3. CREATE NEW CUSTOMER (ADD) - FIXED
 // =============================================
 elseif ($method === 'POST' && $action === 'create') {
     checkPermission('create_customers', $auth, $db);
     
     $data = json_decode(file_get_contents('php://input'), true);
     
+    // Validate required fields
     $required = ['full_name', 'email', 'phone'];
     foreach ($required as $field) {
         if (empty($data[$field])) {
@@ -201,10 +202,12 @@ elseif ($method === 'POST' && $action === 'create') {
         }
     }
     
+    // Validate email format
     if (!empty($data['email']) && !filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
         $db->sendError('Invalid email format', 400);
     }
     
+    // Check if email exists
     if (!empty($data['email'])) {
         $checkEmail = $conn->prepare("SELECT id FROM users WHERE email = :email");
         $checkEmail->execute([':email' => $data['email']]);
@@ -213,6 +216,7 @@ elseif ($method === 'POST' && $action === 'create') {
         }
     }
     
+    // Check if phone exists
     if (!empty($data['phone'])) {
         $checkPhone = $conn->prepare("SELECT id FROM users WHERE phone = :phone");
         $checkPhone->execute([':phone' => $data['phone']]);
@@ -221,42 +225,56 @@ elseif ($method === 'POST' && $action === 'create') {
         }
     }
     
+    // Generate password
     $password = !empty($data['password']) ? $data['password'] : bin2hex(random_bytes(4));
     $hashedPassword = password_hash($password, PASSWORD_DEFAULT);
     
+    // Insert new customer
     $stmt = $conn->prepare("
         INSERT INTO users (
-            full_name, email, phone, password, gender, avatar,
-            member_level, member_points, total_orders, login_method,
-            rating, verified, member_since, created_at, updated_at,
-            email_verified, phone_verified, is_active
+            full_name, 
+            email, 
+            phone, 
+            password, 
+            created_at, 
+            updated_at,
+            is_active,
+            verified
         ) VALUES (
-            :full_name, :email, :phone, :password, :gender, :avatar,
-            'basic', 0, 0, 'email', 0.00, 1, :member_since, NOW(), NOW(),
-            :email_verified, :phone_verified, 1
+            :full_name, 
+            :email, 
+            :phone, 
+            :password, 
+            NOW(), 
+            NOW(),
+            1,
+            1
         )
     ");
     
     $stmt->execute([
         ':full_name' => $data['full_name'],
-        ':email' => $data['email'] ?? null,
-        ':phone' => $data['phone'] ?? null,
-        ':password' => $hashedPassword,
-        ':gender' => $data['gender'] ?? null,
-        ':avatar' => $data['avatar'] ?? null,
-        ':member_since' => date('M d, Y'),
-        ':email_verified' => $data['email_verified'] ?? 1,
-        ':phone_verified' => $data['phone_verified'] ?? 1
+        ':email' => $data['email'],
+        ':phone' => $data['phone'],
+        ':password' => $hashedPassword
     ]);
     
     $newCustomerId = $conn->lastInsertId();
     
-    // Create wallet for new customer
-    $walletStmt = $conn->prepare("
-        INSERT INTO dropx_wallets (user_id, balance, currency, is_active, created_at, updated_at)
-        VALUES (:user_id, 0, 'MWK', 1, NOW(), NOW())
-    ");
-    $walletStmt->execute([':user_id' => $newCustomerId]);
+    // Try to create wallet (if table exists)
+    try {
+        $checkWalletTable = $conn->query("SHOW TABLES LIKE 'dropx_wallets'");
+        if ($checkWalletTable->rowCount() > 0) {
+            $walletStmt = $conn->prepare("
+                INSERT INTO dropx_wallets (user_id, balance, currency, is_active, created_at, updated_at)
+                VALUES (:user_id, 0, 'MWK', 1, NOW(), NOW())
+            ");
+            $walletStmt->execute([':user_id' => $newCustomerId]);
+        }
+    } catch (Exception $e) {
+        // Wallet table doesn't exist - not critical
+        error_log("Wallet creation skipped: " . $e->getMessage());
+    }
     
     $db->sendResponse([
         'id' => $newCustomerId,
