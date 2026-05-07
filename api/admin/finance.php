@@ -1,11 +1,17 @@
 <?php
 // backend/api/admin/finance.php
-// COMPLETE FINANCE MANAGEMENT API WITH COMMISSIONS
+// COMPLETE FINANCE MANAGEMENT API - FULLY FIXED
+
+// =============================================
+// SUPPRESS ALL WARNINGS FOR CLEAN OUTPUT
+// =============================================
+error_reporting(0);
+ini_set('display_errors', 0);
 
 // =============================================
 // CORS CONFIGURATION
 // =============================================
-$production_frontend = getenv('FRONTEND_URL') ?: 'frontend-k2r04vyq2-mbukejnrs-projects.vercel.app';
+$production_frontend = getenv('FRONTEND_URL') ?: 'https://frontend-pink-pi-70.vercel.app';
 
 $allowed_origins = [
     $production_frontend,
@@ -20,12 +26,13 @@ $origin = isset($_SERVER['HTTP_ORIGIN']) ? $_SERVER['HTTP_ORIGIN'] : '';
 if (in_array($origin, $allowed_origins)) {
     header("Access-Control-Allow-Origin: $origin");
 } else {
-    header("Access-Control-Allow-Origin: $production_frontend");
+    header("Access-Control-Allow-Origin: https://frontend-pink-pi-70.vercel.app");
 }
 
 header("Access-Control-Allow-Credentials: true");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
+header("Access-Control-Expose-Headers: Content-Disposition");
 header("Content-Type: application/json; charset=UTF-8");
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -61,58 +68,46 @@ function formatCurrency($amount) {
 }
 
 // =============================================
-// 1. DASHBOARD STATS (FIXED - using 'success' status)
+// 1. DASHBOARD STATS
 // =============================================
 if ($method === 'GET' && $action === 'dashboard') {
     checkPermission('view_finance', $auth, $db);
     
     $stats = [];
     
-    // Today's revenue - using 'success' status (your orders use 'success')
     $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'success' AND DATE(created_at) = CURDATE()");
     $stats['today_revenue'] = floatval($stmt->fetchColumn());
     
-    // Today's orders
     $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status = 'success' AND DATE(created_at) = CURDATE()");
     $stats['today_orders'] = intval($stmt->fetchColumn());
     
-    // Week revenue (last 7 days)
     $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'success' AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)");
     $stats['week_revenue'] = floatval($stmt->fetchColumn());
     
-    // Month revenue
     $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'success' AND MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE())");
     $stats['month_revenue'] = floatval($stmt->fetchColumn());
     
-    // Total revenue all time
     $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'success'");
     $stats['total_revenue'] = floatval($stmt->fetchColumn());
     
-    // Total commissions pending
     $stmt = $conn->query("SELECT COALESCE(SUM(commission_amount), 0) FROM merchant_commissions WHERE status = 'pending'");
     $stats['pending_commissions'] = floatval($stmt->fetchColumn());
     
-    // Total commissions paid
     $stmt = $conn->query("SELECT COALESCE(SUM(commission_amount), 0) FROM merchant_commissions WHERE status = 'paid'");
     $stats['paid_commissions'] = floatval($stmt->fetchColumn());
     
-    // Pending payouts
     $stmt = $conn->query("SELECT COALESCE(SUM(amount), 0) FROM merchant_payouts WHERE status = 'pending'");
     $stats['pending_payouts'] = floatval($stmt->fetchColumn());
     
-    // Average order value
     $stmt = $conn->query("SELECT COALESCE(AVG(total_amount), 0) FROM orders WHERE status = 'success'");
     $stats['avg_order_value'] = floatval($stmt->fetchColumn());
     
-    // Total customers
     $stmt = $conn->query("SELECT COUNT(*) FROM users");
     $stats['total_customers'] = intval($stmt->fetchColumn());
     
-    // Total merchants
     $stmt = $conn->query("SELECT COUNT(*) FROM merchants WHERE is_active = 1");
     $stats['total_merchants'] = intval($stmt->fetchColumn());
     
-    // Top merchants by revenue
     $stmt = $conn->query("
         SELECT m.id, m.name, COALESCE(SUM(o.total_amount), 0) as revenue, COUNT(o.id) as order_count
         FROM merchants m
@@ -123,7 +118,6 @@ if ($method === 'GET' && $action === 'dashboard') {
     ");
     $stats['top_merchants'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // Payment methods breakdown
     $stmt = $conn->query("
         SELECT payment_method, COUNT(*) as count, COALESCE(SUM(total_amount), 0) as total
         FROM orders WHERE status = 'success' AND payment_method IS NOT NULL
@@ -131,7 +125,6 @@ if ($method === 'GET' && $action === 'dashboard') {
     ");
     $stats['by_payment_method'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // Recent transactions
     $stmt = $conn->query("
         SELECT t.*, u.full_name as user_name, u.email as user_email
         FROM wallet_transactions t
@@ -145,157 +138,9 @@ if ($method === 'GET' && $action === 'dashboard') {
 }
 
 // =============================================
-// 11. GET REVENUE CHART DATA (FIXED - using 'success' status)
-// =============================================
-elseif ($method === 'GET' && $action === 'revenue-chart') {
-    checkPermission('view_finance', $auth, $db);
-    
-    $period = isset($_GET['period']) ? $_GET['period'] : 'month';
-    $data = [];
-    
-    if ($period === 'week') {
-        for ($i = 6; $i >= 0; $i--) {
-            $date = date('Y-m-d', strtotime("-$i days"));
-            $stmt = $conn->prepare("
-                SELECT COALESCE(SUM(total_amount), 0) as total,
-                       COUNT(*) as orders
-                FROM orders 
-                WHERE status = 'success' AND DATE(created_at) = :date
-            ");
-            $stmt->execute([':date' => $date]);
-            $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            $data[] = [
-                'date' => date('D, M j', strtotime($date)),
-                'revenue' => floatval($row['total']),
-                'orders' => intval($row['orders'])
-            ];
-        }
-    } elseif ($period === 'month') {
-        for ($i = 29; $i >= 0; $i--) {
-            $date = date('Y-m-d', strtotime("-$i days"));
-            $stmt = $conn->prepare("
-                SELECT COALESCE(SUM(total_amount), 0) as total,
-                       COUNT(*) as orders
-                FROM orders 
-                WHERE status = 'success' AND DATE(created_at) = :date
-            ");
-            $stmt->execute([':date' => $date]);
-            $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            $data[] = [
-                'date' => date('M j', strtotime($date)),
-                'revenue' => floatval($row['total']),
-                'orders' => intval($row['orders'])
-            ];
-        }
-    } elseif ($period === 'year') {
-        for ($i = 11; $i >= 0; $i--) {
-            $month = date('Y-m', strtotime("-$i months"));
-            $stmt = $conn->prepare("
-                SELECT COALESCE(SUM(total_amount), 0) as total,
-                       COUNT(*) as orders
-                FROM orders 
-                WHERE status = 'success' 
-                AND DATE_FORMAT(created_at, '%Y-%m') = :month
-            ");
-            $stmt->execute([':month' => $month]);
-            $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            $data[] = [
-                'date' => date('M Y', strtotime($month . '-01')),
-                'revenue' => floatval($row['total']),
-                'orders' => intval($row['orders'])
-            ];
-        }
-    }
-    
-    $db->sendResponse(['data' => $data]);
-}
-
-// =============================================
-// 14. GET ORDERS (FIXED - showing all orders)
-// =============================================
-elseif ($method === 'GET' && $action === 'orders') {
-    checkPermission('view_finance', $auth, $db);
-    
-    $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
-    $limit = isset($_GET['limit']) ? min(100, max(1, intval($_GET['limit']))) : 20;
-    $search = isset($_GET['search']) ? trim($_GET['search']) : '';
-    $status = isset($_GET['status']) ? $_GET['status'] : '';
-    $dateFrom = isset($_GET['date_from']) ? $_GET['date_from'] : '';
-    $dateTo = isset($_GET['date_to']) ? $_GET['date_to'] : '';
-    $offset = ($page - 1) * $limit;
-    
-    $where = [];
-    $params = [];
-    
-    if ($search) {
-        $where[] = "(o.order_number LIKE :search OR u.full_name LIKE :search OR u.email LIKE :search OR m.name LIKE :search)";
-        $params[':search'] = "%$search%";
-    }
-    
-    if ($status) {
-        $where[] = "o.status = :status";
-        $params[':status'] = $status;
-    }
-    
-    if ($dateFrom) {
-        $where[] = "DATE(o.created_at) >= :date_from";
-        $params[':date_from'] = $dateFrom;
-    }
-    
-    if ($dateTo) {
-        $where[] = "DATE(o.created_at) <= :date_to";
-        $params[':date_to'] = $dateTo;
-    }
-    
-    $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
-    
-    $countSql = "SELECT COUNT(*) as total FROM orders o 
-                 LEFT JOIN users u ON o.user_id = u.id
-                 LEFT JOIN merchants m ON o.merchant_id = m.id
-                 $whereClause";
-    $countStmt = $conn->prepare($countSql);
-    $countStmt->execute($params);
-    $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
-    
-    $sql = "SELECT 
-                o.id, o.order_number, o.total_amount, o.status, o.payment_method,
-                o.created_at, u.full_name as customer_name, u.email as customer_email,
-                m.name as merchant_name
-            FROM orders o
-            LEFT JOIN users u ON o.user_id = u.id
-            LEFT JOIN merchants m ON o.merchant_id = m.id
-            $whereClause
-            ORDER BY o.created_at DESC
-            LIMIT :limit OFFSET :offset";
-    
-    $stmt = $conn->prepare($sql);
-    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
-    $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
-    foreach ($params as $key => $value) {
-        $stmt->bindValue($key, $value);
-    }
-    $stmt->execute();
-    $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-    $db->sendResponse([
-        'orders' => $orders,
-        'pagination' => [
-            'current_page' => $page,
-            'per_page' => $limit,
-            'total' => intval($total),
-            'total_pages' => ceil($total / $limit)
-        ]
-    ]);
-}
-
-// The rest of your endpoints remain the same...
-// (commissions, payouts, transactions, etc. - they don't need changes)
-
-// =============================================
 // 2. GET COMMISSIONS LIST
 // =============================================
 elseif ($method === 'GET' && $action === 'commissions') {
-    // ... (keep your existing code)
     checkPermission('view_commissions', $auth, $db);
     
     $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
@@ -393,7 +238,6 @@ elseif ($method === 'GET' && $action === 'commission-summary') {
 // 4. UPDATE COMMISSION STATUS
 // =============================================
 elseif ($method === 'PUT' && $commissionId && $action === 'update-commission') {
-    // ... (keep your existing code)
     checkPermission('edit_commissions', $auth, $db);
     
     $data = json_decode(file_get_contents('php://input'), true);
@@ -425,7 +269,6 @@ elseif ($method === 'PUT' && $commissionId && $action === 'update-commission') {
 // 5. BULK UPDATE COMMISSIONS
 // =============================================
 elseif ($method === 'POST' && $action === 'bulk-update-commissions') {
-    // ... (keep your existing code)
     checkPermission('edit_commissions', $auth, $db);
     
     $data = json_decode(file_get_contents('php://input'), true);
@@ -465,7 +308,6 @@ elseif ($method === 'POST' && $action === 'bulk-update-commissions') {
 // 6. GET MERCHANT COMMISSION SETTINGS
 // =============================================
 elseif ($method === 'GET' && $action === 'commission-settings') {
-    // ... (keep your existing code)
     checkPermission('edit_commissions', $auth, $db);
     
     $merchantId = isset($_GET['merchant_id']) ? intval($_GET['merchant_id']) : null;
@@ -501,7 +343,6 @@ elseif ($method === 'GET' && $action === 'commission-settings') {
 // 7. UPDATE MERCHANT COMMISSION SETTINGS
 // =============================================
 elseif ($method === 'POST' && $action === 'update-commission-settings') {
-    // ... (keep your existing code)
     checkPermission('edit_commissions', $auth, $db);
     
     $data = json_decode(file_get_contents('php://input'), true);
@@ -510,7 +351,6 @@ elseif ($method === 'POST' && $action === 'update-commission-settings') {
         $db->sendError('merchant_id and base_rate are required', 400);
     }
     
-    // End current active setting
     $stmt = $conn->prepare("
         UPDATE merchant_commission_settings 
         SET effective_to = CURDATE() 
@@ -518,7 +358,6 @@ elseif ($method === 'POST' && $action === 'update-commission-settings') {
     ");
     $stmt->execute([':merchant_id' => $data['merchant_id']]);
     
-    // Insert new setting
     $stmt = $conn->prepare("
         INSERT INTO merchant_commission_settings (
             merchant_id, base_rate, volume_discount_threshold, 
@@ -544,7 +383,6 @@ elseif ($method === 'POST' && $action === 'update-commission-settings') {
 // 8. GET PAYOUTS
 // =============================================
 elseif ($method === 'GET' && $action === 'payouts') {
-    // ... (keep your existing code)
     checkPermission('view_finance', $auth, $db);
     
     $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
@@ -605,7 +443,6 @@ elseif ($method === 'GET' && $action === 'payouts') {
 // 9. CREATE PAYOUT
 // =============================================
 elseif ($method === 'POST' && $action === 'create-payout') {
-    // ... (keep your existing code)
     checkPermission('create_payouts', $auth, $db);
     
     $data = json_decode(file_get_contents('php://input'), true);
@@ -615,9 +452,7 @@ elseif ($method === 'POST' && $action === 'create-payout') {
     }
     
     $payoutNumber = 'PO-' . strtoupper(uniqid());
-    
-    // Calculate commission amount (assuming standard rate for now)
-    $commissionAmount = $data['amount'] * 0.10; // 10% commission
+    $commissionAmount = $data['amount'] * 0.10;
     $netAmount = $data['amount'] - $commissionAmount;
     
     $stmt = $conn->prepare("
@@ -652,7 +487,6 @@ elseif ($method === 'POST' && $action === 'create-payout') {
 // 10. UPDATE PAYOUT STATUS
 // =============================================
 elseif ($method === 'PUT' && $action === 'update-payout' && isset($_GET['payout_id'])) {
-    // ... (keep your existing code)
     checkPermission('process_payouts', $auth, $db);
     
     $payoutId = intval($_GET['payout_id']);
@@ -682,7 +516,73 @@ elseif ($method === 'PUT' && $action === 'update-payout' && isset($_GET['payout_
 }
 
 // =============================================
-// 12. EXPORT COMMISSIONS TO CSV
+// 11. GET REVENUE CHART DATA
+// =============================================
+elseif ($method === 'GET' && $action === 'revenue-chart') {
+    checkPermission('view_finance', $auth, $db);
+    
+    $period = isset($_GET['period']) ? $_GET['period'] : 'month';
+    $data = [];
+    
+    if ($period === 'week') {
+        for ($i = 6; $i >= 0; $i--) {
+            $date = date('Y-m-d', strtotime("-$i days"));
+            $stmt = $conn->prepare("
+                SELECT COALESCE(SUM(total_amount), 0) as total,
+                       COUNT(*) as orders
+                FROM orders 
+                WHERE status = 'success' AND DATE(created_at) = :date
+            ");
+            $stmt->execute([':date' => $date]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            $data[] = [
+                'date' => date('D, M j', strtotime($date)),
+                'revenue' => floatval($row['total']),
+                'orders' => intval($row['orders'])
+            ];
+        }
+    } elseif ($period === 'month') {
+        for ($i = 29; $i >= 0; $i--) {
+            $date = date('Y-m-d', strtotime("-$i days"));
+            $stmt = $conn->prepare("
+                SELECT COALESCE(SUM(total_amount), 0) as total,
+                       COUNT(*) as orders
+                FROM orders 
+                WHERE status = 'success' AND DATE(created_at) = :date
+            ");
+            $stmt->execute([':date' => $date]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            $data[] = [
+                'date' => date('M j', strtotime($date)),
+                'revenue' => floatval($row['total']),
+                'orders' => intval($row['orders'])
+            ];
+        }
+    } elseif ($period === 'year') {
+        for ($i = 11; $i >= 0; $i--) {
+            $month = date('Y-m', strtotime("-$i months"));
+            $stmt = $conn->prepare("
+                SELECT COALESCE(SUM(total_amount), 0) as total,
+                       COUNT(*) as orders
+                FROM orders 
+                WHERE status = 'success' 
+                AND DATE_FORMAT(created_at, '%Y-%m') = :month
+            ");
+            $stmt->execute([':month' => $month]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            $data[] = [
+                'date' => date('M Y', strtotime($month . '-01')),
+                'revenue' => floatval($row['total']),
+                'orders' => intval($row['orders'])
+            ];
+        }
+    }
+    
+    $db->sendResponse(['data' => $data]);
+}
+
+// =============================================
+// 12. EXPORT COMMISSIONS TO CSV - FIXED FOR PHP 8.1+
 // =============================================
 elseif ($method === 'GET' && $action === 'export-commissions') {
     checkPermission('export_finance', $auth, $db);
@@ -703,25 +603,35 @@ elseif ($method === 'GET' && $action === 'export-commissions') {
     $stmt->execute([':period' => $period]);
     $commissions = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    header('Content-Type: text/csv');
+    // Clear any output buffers
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
+    
+    // Set CSV headers for download
+    header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename="commissions_' . $period . '.csv"');
+    header('Cache-Control: must-revalidate, post-check=0, pre-check=0');
+    header('Expires: 0');
+    header('Pragma: public');
     
     $output = fopen('php://output', 'w');
     fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
     
-    fputcsv($output, ['ID', 'Merchant', 'Order #', 'Order Amount', 'Commission Rate', 'Commission Amount', 'Status', 'Date']);
+    // Add CSV headers - FIXED for PHP 8.1+
+    fputcsv($output, ['ID', 'Merchant', 'Order #', 'Order Amount', 'Commission Rate', 'Commission Amount', 'Status', 'Date'], ',', '"', '\\');
     
     foreach ($commissions as $c) {
         fputcsv($output, [
             $c['id'],
             $c['merchant_name'],
             $c['order_number'],
-            $c['order_amount'],
+            number_format($c['order_amount'], 2),
             $c['commission_rate'] . '%',
-            $c['commission_amount'],
+            number_format($c['commission_amount'], 2),
             $c['status'],
             $c['created_at']
-        ]);
+        ], ',', '"', '\\');
     }
     
     fclose($output);
@@ -809,9 +719,267 @@ elseif ($method === 'GET' && $action === 'transactions') {
 }
 
 // =============================================
+// 14. GET ORDERS
+// =============================================
+elseif ($method === 'GET' && $action === 'orders') {
+    checkPermission('view_finance', $auth, $db);
+    
+    $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
+    $limit = isset($_GET['limit']) ? min(100, max(1, intval($_GET['limit']))) : 20;
+    $search = isset($_GET['search']) ? trim($_GET['search']) : '';
+    $status = isset($_GET['status']) ? $_GET['status'] : '';
+    $dateFrom = isset($_GET['date_from']) ? $_GET['date_from'] : '';
+    $dateTo = isset($_GET['date_to']) ? $_GET['date_to'] : '';
+    $offset = ($page - 1) * $limit;
+    
+    $where = [];
+    $params = [];
+    
+    if ($search) {
+        $where[] = "(o.order_number LIKE :search OR u.full_name LIKE :search OR u.email LIKE :search OR m.name LIKE :search)";
+        $params[':search'] = "%$search%";
+    }
+    
+    if ($status) {
+        $where[] = "o.status = :status";
+        $params[':status'] = $status;
+    }
+    
+    if ($dateFrom) {
+        $where[] = "DATE(o.created_at) >= :date_from";
+        $params[':date_from'] = $dateFrom;
+    }
+    
+    if ($dateTo) {
+        $where[] = "DATE(o.created_at) <= :date_to";
+        $params[':date_to'] = $dateTo;
+    }
+    
+    $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
+    
+    $countSql = "SELECT COUNT(*) as total FROM orders o 
+                 LEFT JOIN users u ON o.user_id = u.id
+                 LEFT JOIN merchants m ON o.merchant_id = m.id
+                 $whereClause";
+    $countStmt = $conn->prepare($countSql);
+    $countStmt->execute($params);
+    $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
+    
+    $sql = "SELECT 
+                o.id, o.order_number, o.total_amount, o.status, o.payment_method,
+                o.created_at, u.full_name as customer_name, u.email as customer_email,
+                m.name as merchant_name
+            FROM orders o
+            LEFT JOIN users u ON o.user_id = u.id
+            LEFT JOIN merchants m ON o.merchant_id = m.id
+            $whereClause
+            ORDER BY o.created_at DESC
+            LIMIT :limit OFFSET :offset";
+    
+    $stmt = $conn->prepare($sql);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+    foreach ($params as $key => $value) {
+        $stmt->bindValue($key, $value);
+    }
+    $stmt->execute();
+    $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    $db->sendResponse([
+        'orders' => $orders,
+        'pagination' => [
+            'current_page' => $page,
+            'per_page' => $limit,
+            'total' => intval($total),
+            'total_pages' => ceil($total / $limit)
+        ]
+    ]);
+}
+
+// =============================================
+// 15. EXPORT TRANSACTIONS TO CSV - FIXED FOR PHP 8.1+
+// =============================================
+elseif ($method === 'GET' && $action === 'export-transactions') {
+    checkPermission('export_finance', $auth, $db);
+    
+    $search = isset($_GET['search']) ? trim($_GET['search']) : '';
+    $type = isset($_GET['type']) ? $_GET['type'] : '';
+    $status = isset($_GET['status']) ? $_GET['status'] : '';
+    $dateFrom = isset($_GET['date_from']) ? $_GET['date_from'] : '';
+    $dateTo = isset($_GET['date_to']) ? $_GET['date_to'] : '';
+    
+    $where = [];
+    $params = [];
+    
+    if ($search) {
+        $where[] = "(u.full_name LIKE :search OR u.email LIKE :search OR t.transaction_id LIKE :search)";
+        $params[':search'] = "%$search%";
+    }
+    
+    if ($type) {
+        $where[] = "t.type = :type";
+        $params[':type'] = $type;
+    }
+    
+    if ($status) {
+        $where[] = "t.status = :status";
+        $params[':status'] = $status;
+    }
+    
+    if ($dateFrom) {
+        $where[] = "DATE(t.created_at) >= :date_from";
+        $params[':date_from'] = $dateFrom;
+    }
+    
+    if ($dateTo) {
+        $where[] = "DATE(t.created_at) <= :date_to";
+        $params[':date_to'] = $dateTo;
+    }
+    
+    $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
+    
+    $sql = "SELECT 
+                t.transaction_id, t.type, t.amount, t.status, t.description,
+                t.created_at, u.full_name as user_name, u.email as user_email
+            FROM wallet_transactions t
+            LEFT JOIN users u ON t.user_id = u.id
+            $whereClause
+            ORDER BY t.created_at DESC";
+    
+    $stmt = $conn->prepare($sql);
+    foreach ($params as $key => $value) {
+        $stmt->bindValue($key, $value);
+    }
+    $stmt->execute();
+    $transactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Clear any output buffers
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
+    
+    // Set CSV headers for download
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="transactions_' . date('Y-m-d_His') . '.csv"');
+    header('Cache-Control: must-revalidate, post-check=0, pre-check=0');
+    header('Expires: 0');
+    header('Pragma: public');
+    
+    $output = fopen('php://output', 'w');
+    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
+    
+    // Add CSV headers - FIXED for PHP 8.1+
+    fputcsv($output, ['Transaction ID', 'User', 'Email', 'Type', 'Amount', 'Status', 'Description', 'Date'], ',', '"', '\\');
+    
+    foreach ($transactions as $t) {
+        fputcsv($output, [
+            $t['transaction_id'],
+            $t['user_name'] ?? 'System',
+            $t['user_email'] ?? '',
+            $t['type'],
+            number_format($t['amount'], 2),
+            $t['status'],
+            $t['description'],
+            $t['created_at']
+        ], ',', '"', '\\');
+    }
+    
+    fclose($output);
+    exit();
+}
+
+// =============================================
+// 16. EXPORT ORDERS TO CSV - FIXED FOR PHP 8.1+
+// =============================================
+elseif ($method === 'GET' && $action === 'export-orders') {
+    checkPermission('export_finance', $auth, $db);
+    
+    $search = isset($_GET['search']) ? trim($_GET['search']) : '';
+    $status = isset($_GET['status']) ? $_GET['status'] : '';
+    $dateFrom = isset($_GET['date_from']) ? $_GET['date_from'] : '';
+    $dateTo = isset($_GET['date_to']) ? $_GET['date_to'] : '';
+    
+    $where = [];
+    $params = [];
+    
+    if ($search) {
+        $where[] = "(o.order_number LIKE :search OR u.full_name LIKE :search OR u.email LIKE :search OR m.name LIKE :search)";
+        $params[':search'] = "%$search%";
+    }
+    
+    if ($status) {
+        $where[] = "o.status = :status";
+        $params[':status'] = $status;
+    }
+    
+    if ($dateFrom) {
+        $where[] = "DATE(o.created_at) >= :date_from";
+        $params[':date_from'] = $dateFrom;
+    }
+    
+    if ($dateTo) {
+        $where[] = "DATE(o.created_at) <= :date_to";
+        $params[':date_to'] = $dateTo;
+    }
+    
+    $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
+    
+    $sql = "SELECT 
+                o.order_number, o.total_amount, o.status, o.payment_method,
+                o.created_at, u.full_name as customer_name, u.email as customer_email,
+                m.name as merchant_name
+            FROM orders o
+            LEFT JOIN users u ON o.user_id = u.id
+            LEFT JOIN merchants m ON o.merchant_id = m.id
+            $whereClause
+            ORDER BY o.created_at DESC";
+    
+    $stmt = $conn->prepare($sql);
+    foreach ($params as $key => $value) {
+        $stmt->bindValue($key, $value);
+    }
+    $stmt->execute();
+    $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Clear any output buffers
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
+    
+    // Set CSV headers for download
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="orders_' . date('Y-m-d_His') . '.csv"');
+    header('Cache-Control: must-revalidate, post-check=0, pre-check=0');
+    header('Expires: 0');
+    header('Pragma: public');
+    
+    $output = fopen('php://output', 'w');
+    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
+    
+    // Add CSV headers - FIXED for PHP 8.1+
+    fputcsv($output, ['Order #', 'Customer', 'Email', 'Merchant', 'Amount', 'Status', 'Payment Method', 'Date'], ',', '"', '\\');
+    
+    foreach ($orders as $o) {
+        fputcsv($output, [
+            $o['order_number'],
+            $o['customer_name'],
+            $o['customer_email'],
+            $o['merchant_name'],
+            number_format($o['total_amount'], 2),
+            $o['status'],
+            $o['payment_method'],
+            $o['created_at']
+        ], ',', '"', '\\');
+    }
+    
+    fclose($output);
+    exit();
+}
+
+// =============================================
 // Invalid action handler
 // =============================================
 else {
-    $db->sendError('Invalid action. Available actions: dashboard, commissions, commission-summary, update-commission, bulk-update-commissions, commission-settings, update-commission-settings, payouts, create-payout, update-payout, revenue-chart, export-commissions, transactions, orders', 400);
+    $db->sendError('Invalid action. Available actions: dashboard, commissions, commission-summary, update-commission, bulk-update-commissions, commission-settings, update-commission-settings, payouts, create-payout, update-payout, revenue-chart, export-commissions, export-transactions, export-orders, transactions, orders', 400);
 }
 ?>
