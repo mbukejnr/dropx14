@@ -9,8 +9,7 @@
 // =============================================
 
 // Get the actual frontend URL from environment variable
-$production_frontend = getenv('FRONTEND_URL') ?: 'frontend-k2r04vyq2-mbukejnrs-projects.vercel.app';
-
+$production_frontend = getenv('FRONTEND_URL') ?: 'https://frontend-pink-pi-70.vercel.app';
 // Set CORS headers - Allow only your production frontend
 header("Access-Control-Allow-Origin: $production_frontend");
 header("Access-Control-Allow-Credentials: true");
