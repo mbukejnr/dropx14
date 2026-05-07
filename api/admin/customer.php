@@ -1,9 +1,9 @@
 <?php
 // backend/api/admin/customer.php
-// COMPLETE ADMIN CUSTOMER MANAGEMENT API - FOLLOWS SAME PATTERN AS admin_management.php
+// COMPLETE ADMIN CUSTOMER MANAGEMENT API - MATCHES YOUR EXACT DATABASE SCHEMA
 
 // =============================================
-// CORS HEADERS - MUST BE FIRST (SAME AS admin_management.php)
+// CORS HEADERS - SAME AS WORKING admin_management.php
 // =============================================
 $allowed_origins = [
     'https://frontend-pink-pi-70.vercel.app',
@@ -75,7 +75,6 @@ function formatCustomerData($customer) {
         'phone' => $customer['phone'] ?? '',
         'gender' => $customer['gender'] ?? '',
         'avatar' => $customer['avatar'] ?? null,
-        'login_method' => $customer['login_method'] ?? 'email',
         'member_level' => $customer['member_level'] ?? 'basic',
         'member_points' => (int) ($customer['member_points'] ?? 0),
         'total_orders' => (int) ($customer['total_orders'] ?? 0),
@@ -131,7 +130,7 @@ if ($method === 'GET' && $action === 'list') {
     // Get customers with stats
     $sql = "SELECT 
                 u.*,
-                (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as order_count,
+                (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as total_orders,
                 (SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE user_id = u.id AND status = 'completed') as total_spent,
                 (SELECT balance FROM dropx_wallets WHERE user_id = u.id AND is_active = 1 LIMIT 1) as wallet_balance,
                 (SELECT MAX(created_at) FROM orders WHERE user_id = u.id) as last_order_date
@@ -172,7 +171,7 @@ elseif ($method === 'GET' && $customerId && $action === 'details') {
     
     $stmt = $conn->prepare("
         SELECT u.*,
-            (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as order_count,
+            (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as total_orders,
             (SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE user_id = u.id AND status = 'completed') as total_spent,
             (SELECT balance FROM dropx_wallets WHERE user_id = u.id AND is_active = 1 LIMIT 1) as wallet_balance,
             (SELECT MAX(created_at) FROM orders WHERE user_id = u.id) as last_order_date
@@ -192,7 +191,7 @@ elseif ($method === 'GET' && $customerId && $action === 'details') {
 }
 
 // =============================================
-// 3. CREATE NEW CUSTOMER (ADD)
+// 3. CREATE NEW CUSTOMER (ADD) - MATCHES YOUR SCHEMA
 // =============================================
 elseif ($method === 'POST' && $action === 'create') {
     checkPermission('create_customers', $auth, $db);
@@ -230,28 +229,67 @@ elseif ($method === 'POST' && $action === 'create') {
     $password = !empty($data['password']) ? $data['password'] : bin2hex(random_bytes(4));
     $hashedPassword = password_hash($password, PASSWORD_DEFAULT);
     
-    // Insert new customer
+    // Get current date for member_since (format: "Mar 15, 2024")
+    $memberSince = date('M d, Y');
+    
+    // Insert new customer - MATCHES YOUR EXACT SCHEMA
     $stmt = $conn->prepare("
-        INSERT INTO users (full_name, email, phone, password, is_active, created_at, updated_at)
-        VALUES (:full_name, :email, :phone, :password, 1, NOW(), NOW())
+        INSERT INTO users (
+            full_name, 
+            email, 
+            phone, 
+            password, 
+            gender,
+            member_level,
+            member_points,
+            login_method,
+            rating,
+            verified,
+            member_since,
+            email_verified,
+            phone_verified,
+            created_at,
+            updated_at
+        ) VALUES (
+            :full_name, 
+            :email, 
+            :phone, 
+            :password, 
+            :gender,
+            'basic',
+            0,
+            'email',
+            0.00,
+            1,
+            :member_since,
+            1,
+            1,
+            NOW(),
+            NOW()
+        )
     ");
     
     $stmt->execute([
         ':full_name' => $data['full_name'],
         ':email' => $data['email'],
         ':phone' => $data['phone'],
-        ':password' => $hashedPassword
+        ':password' => $hashedPassword,
+        ':gender' => $data['gender'] ?? null,
+        ':member_since' => $memberSince
     ]);
     
     $newCustomerId = $conn->lastInsertId();
     
     // Create wallet for new customer (if wallets table exists)
     try {
-        $walletStmt = $conn->prepare("
-            INSERT INTO dropx_wallets (user_id, balance, currency, is_active, created_at, updated_at)
-            VALUES (:user_id, 0, 'MWK', 1, NOW(), NOW())
-        ");
-        $walletStmt->execute([':user_id' => $newCustomerId]);
+        $checkWalletTable = $conn->query("SHOW TABLES LIKE 'dropx_wallets'");
+        if ($checkWalletTable->rowCount() > 0) {
+            $walletStmt = $conn->prepare("
+                INSERT INTO dropx_wallets (user_id, balance, currency, is_active, created_at, updated_at)
+                VALUES (:user_id, 0, 'MWK', 1, NOW(), NOW())
+            ");
+            $walletStmt->execute([':user_id' => $newCustomerId]);
+        }
     } catch (PDOException $e) {
         // Wallet table might not exist - that's fine
     }
@@ -273,7 +311,7 @@ elseif ($method === 'PUT' && $customerId && $action === 'update') {
     $fields = [];
     $params = [':id' => $customerId];
     
-    $allowedFields = ['full_name', 'email', 'phone', 'gender', 'avatar', 'is_active', 'verified'];
+    $allowedFields = ['full_name', 'email', 'phone', 'gender', 'member_level', 'member_points', 'verified', 'is_active'];
     
     foreach ($allowedFields as $field) {
         if (isset($data[$field])) {
