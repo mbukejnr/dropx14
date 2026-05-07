@@ -1,11 +1,11 @@
 <?php
 // backend/api/admin/customer.php
-// COMPLETE ADMIN CUSTOMER MANAGEMENT API
+// COMPLETE ADMIN CUSTOMER MANAGEMENT API - FIXED FOR PHP 8.1+
 
 // =============================================
 // CORS CONFIGURATION
 // =============================================
-$production_frontend = getenv('FRONTEND_URL') ?: 'frontend-k2r04vyq2-mbukejnrs-projects.vercel.app';
+$production_frontend = getenv('FRONTEND_URL') ?: 'https://frontend-pink-pi-70.vercel.app';
 
 $allowed_origins = [
     $production_frontend,
@@ -20,12 +20,13 @@ $origin = isset($_SERVER['HTTP_ORIGIN']) ? $_SERVER['HTTP_ORIGIN'] : '';
 if (in_array($origin, $allowed_origins)) {
     header("Access-Control-Allow-Origin: $origin");
 } else {
-    header("Access-Control-Allow-Origin: $production_frontend");
+    header("Access-Control-Allow-Origin: https://frontend-pink-pi-70.vercel.app");
 }
 
 header("Access-Control-Allow-Credentials: true");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
+header("Access-Control-Expose-Headers: Content-Disposition");
 header("Content-Type: application/json; charset=UTF-8");
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -565,7 +566,7 @@ elseif ($method === 'POST' && $action === 'bulk-status') {
 }
 
 // =============================================
-// 13. EXPORT CUSTOMERS TO CSV
+// 13. EXPORT CUSTOMERS TO CSV - FIXED FOR PHP 8.1+
 // =============================================
 elseif ($method === 'GET' && $action === 'export') {
     checkPermission('view_customers', $auth, $db);
@@ -600,31 +601,54 @@ elseif ($method === 'GET' && $action === 'export') {
     $stmt->execute();
     $customers = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    header('Content-Type: text/csv');
-    header('Content-Disposition: attachment; filename="customers_' . date('Y-m-d') . '.csv"');
+    // Turn off error reporting for CSV output to prevent warnings
+    error_reporting(0);
     
+    // Clear any output buffers
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
+    
+    // Set CSV headers for download
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="customers_export_' . date('Y-m-d_His') . '.csv"');
+    header('Cache-Control: must-revalidate, post-check=0, pre-check=0');
+    header('Expires: 0');
+    header('Pragma: public');
+    
+    // Create output stream
     $output = fopen('php://output', 'w');
+    
+    // Add UTF-8 BOM for proper Excel encoding
     fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
     
+    // Add CSV headers - FIXED: Added 5th parameter for escape character (PHP 8.1+)
     fputcsv($output, [
         'ID', 'Full Name', 'Email', 'Phone', 'Gender',
         'Total Orders', 'Wallet Balance (MK)', 'Status',
         'Registered Date', 'Last Active'
-    ]);
+    ], ',', '"', '\\');
     
+    // Add data rows - FIXED: Added 5th parameter for escape character (PHP 8.1+)
     foreach ($customers as $customer) {
+        // Format phone to avoid scientific notation
+        $phone = $customer['phone'] ?? '';
+        if (!empty($phone) && is_numeric($phone) && strlen($phone) > 10) {
+            $phone = "'" . $phone;
+        }
+        
         fputcsv($output, [
             $customer['id'],
             $customer['full_name'],
             $customer['email'] ?? '',
-            $customer['phone'] ?? '',
+            $phone,
             $customer['gender'] ?? '',
             $customer['total_orders'] ?? 0,
             number_format($customer['wallet_balance'] ?? 0, 2),
             $customer['is_active'] ? 'Active' : 'Inactive',
             $customer['registered_date'] ?? '',
             $customer['last_active'] ?? 'Never'
-        ]);
+        ], ',', '"', '\\');
     }
     
     fclose($output);
