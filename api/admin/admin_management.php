@@ -1,10 +1,40 @@
 <?php
 // backend/api/admin/admin_management.php
-// COMPLETE ADMIN MANAGEMENT API - PRODUCTION READY WITH IMAGE UPLOAD
-// INTEGRATED WITH EXISTING AUTH SYSTEM
+// COMPLETE ADMIN MANAGEMENT API - Works with existing admin_auth.php
 
 // =============================================
-// CORS & AUTH LOADING (SAME AS merchants.php)
+// CORS CONFIGURATION (Same as admin_auth.php)
+// =============================================
+$production_frontend = getenv('FRONTEND_URL') ?: 'https://frontend-pink-pi-70.vercel.app';
+
+$allowed_origins = [
+    $production_frontend,
+    'https://frontend-pink-pi-70.vercel.app',
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:5173'
+];
+
+$origin = isset($_SERVER['HTTP_ORIGIN']) ? $_SERVER['HTTP_ORIGIN'] : '';
+
+if (in_array($origin, $allowed_origins)) {
+    header("Access-Control-Allow-Origin: $origin");
+} else {
+    header("Access-Control-Allow-Origin: $production_frontend");
+}
+
+header("Access-Control-Allow-Credentials: true");
+header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
+header("Content-Type: application/json; charset=UTF-8");
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
+
+// =============================================
+// REQUIRE AUTH FILES (Same as admin_auth.php)
 // =============================================
 require_once __DIR__ . '/../../config/admin_database.php';
 require_once __DIR__ . '/../../includes/admin_auth.php';
@@ -14,7 +44,7 @@ $db = AdminDatabase::getInstance();
 $conn = $db->getConnection();
 $auth = new AdminAuth();
 
-// Verify admin is logged in and get admin data
+// FIX: Use $admin instead of $currentAdmin to match the working pattern
 $admin = $auth->validateToken();
 
 if (!$admin) {
@@ -24,99 +54,9 @@ if (!$admin) {
 $method = $_SERVER['REQUEST_METHOD'];
 $action = isset($_GET['action']) ? $_GET['action'] : '';
 $adminId = isset($_GET['id']) ? intval($_GET['id']) : null;
-$baseUrl = "https://dropx14-production.up.railway.app";
-
-// Create upload directories if they don't exist
-$uploadBaseDir = __DIR__ . '/../../uploads/';
-$uploadDirs = [
-    'admin_avatars' => $uploadBaseDir . 'admin_avatars/'
-];
-
-foreach ($uploadDirs as $dir) {
-    if (!file_exists($dir)) {
-        mkdir($dir, 0777, true);
-    }
-}
 
 // =============================================
-// HELPER FUNCTION: FORMAT IMAGE URL (SAME AS merchants.php)
-// =============================================
-function formatImageUrl($imagePath, $baseUrl, $type = '') {
-    if (empty($imagePath)) {
-        return null;
-    }
-    
-    // If it's already a full URL, return as is
-    if (strpos($imagePath, 'http://') === 0 || strpos($imagePath, 'https://') === 0) {
-        return $imagePath;
-    }
-    
-    // Remove leading slashes
-    $imagePath = ltrim($imagePath, '/');
-    
-    // Map type to folder
-    $folderMap = [
-        'admin_avatar' => 'admin_avatars'
-    ];
-    
-    $folder = isset($folderMap[$type]) ? $folderMap[$type] : 'admin_avatars';
-    
-    return rtrim($baseUrl, '/') . '/uploads/' . $folder . '/' . $imagePath;
-}
-
-// =============================================
-// HELPER FUNCTION: HANDLE IMAGE UPLOAD (SAME AS merchants.php)
-// =============================================
-function handleImageUpload($file, $type, $adminId = null) {
-    global $uploadDirs, $baseUrl;
-    
-    // Check if file was uploaded
-    if (!isset($file) || $file['error'] !== UPLOAD_ERR_OK) {
-        return ['success' => false, 'error' => 'No file uploaded or upload error'];
-    }
-    
-    // Map type to directory
-    $dirMap = [
-        'admin_avatar' => 'admin_avatars'
-    ];
-    
-    $folder = isset($dirMap[$type]) ? $dirMap[$type] : 'admin_avatars';
-    $targetDir = $uploadDirs[$folder];
-    
-    // Validate file type
-    $allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/jpg'];
-    if (!in_array($file['type'], $allowedTypes)) {
-        return ['success' => false, 'error' => 'Invalid file type. Only JPEG, PNG, GIF, WEBP are allowed.'];
-    }
-    
-    // Validate file size (max 5MB)
-    if ($file['size'] > 5 * 1024 * 1024) {
-        return ['success' => false, 'error' => 'File too large. Max 5MB allowed.'];
-    }
-    
-    // Generate unique filename
-    $extension = pathinfo($file['name'], PATHINFO_EXTENSION);
-    $filename = uniqid() . '_' . time() . '.' . $extension;
-    $relativePath = $filename;
-    $fullPath = $targetDir . $filename;
-    
-    // Move uploaded file
-    if (move_uploaded_file($file['tmp_name'], $fullPath)) {
-        // Construct full URL
-        $imageUrl = rtrim($baseUrl, '/') . '/uploads/' . $folder . '/' . $filename;
-        
-        return [
-            'success' => true,
-            'url' => $imageUrl,
-            'path' => $filename
-        ];
-    } else {
-        return ['success' => false, 'error' => 'Failed to move uploaded file'];
-    }
-}
-
-// =============================================
-// PERMISSION CHECK FUNCTION (SAME AS merchants.php)
+// PERMISSION CHECK FUNCTION
 // =============================================
 function checkPermission($permission, $auth, $db) {
     if (!$auth->hasPermission($permission)) {
@@ -128,9 +68,7 @@ function checkPermission($permission, $auth, $db) {
 // FORMAT ADMIN DATA FUNCTION
 // =============================================
 function formatAdminData($adminUser) {
-    global $baseUrl;
-    
-    $formatted = [
+    return [
         'id' => $adminUser['id'],
         'full_name' => $adminUser['full_name'],
         'email' => $adminUser['email'],
@@ -145,56 +83,12 @@ function formatAdminData($adminUser) {
         'created_by' => $adminUser['created_by'] ?? null,
         'created_by_name' => $adminUser['created_by_name'] ?? null
     ];
-    
-    // Format avatar URL if exists
-    if (!empty($adminUser['avatar_url'])) {
-        $formatted['avatar_url'] = formatImageUrl($adminUser['avatar_url'], $baseUrl, 'admin_avatar');
-    } else {
-        $formatted['avatar_url'] = null;
-    }
-    
-    return $formatted;
-}
-
-// =============================================
-// 0. IMAGE UPLOAD ENDPOINT (ADDED - MISSING FROM ORIGINAL)
-// =============================================
-if ($method === 'POST' && $action === 'upload-avatar') {
-    checkPermission('edit_admins', $auth, $db);
-    
-    $adminId = isset($_POST['admin_id']) ? intval($_POST['admin_id']) : null;
-    
-    if (!$adminId) {
-        $db->sendError('Admin ID is required', 400);
-    }
-    
-    if (!isset($_FILES['avatar'])) {
-        $db->sendError('No image file provided', 400);
-    }
-    
-    $result = handleImageUpload($_FILES['avatar'], 'admin_avatar', $adminId);
-    
-    if ($result['success']) {
-        // Update admin's avatar in database
-        $stmt = $conn->prepare("UPDATE admin_users SET avatar_url = :avatar, updated_at = NOW() WHERE id = :id");
-        $stmt->execute([
-            ':avatar' => $result['path'],
-            ':id' => $adminId
-        ]);
-        
-        $db->sendResponse([
-            'url' => $result['url'],
-            'path' => $result['path']
-        ], 'Avatar uploaded successfully', 200);
-    } else {
-        $db->sendError($result['error'], 400);
-    }
 }
 
 // =============================================
 // 1. LIST ALL ADMINS
 // =============================================
-elseif ($method === 'GET' && $action === 'list') {
+if ($method === 'GET' && $action === 'list') {
     checkPermission('view_admins', $auth, $db);
     
     $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
@@ -262,11 +156,6 @@ elseif ($method === 'GET' && $action === 'list') {
     $db->sendResponse([
         'admins' => $admins,
         'roles' => $roles,
-        'admin' => [
-            'id' => $admin['id'],
-            'role' => $admin['role'],
-            'name' => $admin['full_name']
-        ],
         'pagination' => [
             'current_page' => $page,
             'per_page' => $limit,
@@ -400,16 +289,6 @@ elseif ($method === 'PUT' && $adminId && $action === 'update') {
             $fields[] = "$field = :$field";
             $params[":$field"] = $data[$field];
         }
-    }
-    
-    // Handle avatar update
-    if (isset($data['avatar_url'])) {
-        $avatarUrl = $data['avatar_url'];
-        if (!empty($avatarUrl) && strpos($avatarUrl, $baseUrl) === 0) {
-            $avatarUrl = str_replace($baseUrl . '/uploads/admin_avatars/', '', $avatarUrl);
-        }
-        $fields[] = "avatar_url = :avatar_url";
-        $params[':avatar_url'] = $avatarUrl;
     }
     
     // Handle password update
@@ -620,14 +499,7 @@ elseif ($method === 'GET' && $action === 'stats') {
     ");
     $stats['active_last_week'] = intval($stmt->fetchColumn());
     
-    $db->sendResponse([
-        'stats' => $stats,
-        'admin' => [
-            'id' => $admin['id'],
-            'role' => $admin['role'],
-            'name' => $admin['full_name']
-        ]
-    ]);
+    $db->sendResponse(['stats' => $stats]);
 }
 
 // =============================================
@@ -757,81 +629,9 @@ elseif ($method === 'GET' && $action === 'export') {
 }
 
 // =============================================
-// 14. GET CURRENT ADMIN PROFILE (ADDED NEW)
-// =============================================
-elseif ($method === 'GET' && $action === 'profile') {
-    $stmt = $conn->prepare("SELECT * FROM admin_users WHERE id = :id");
-    $stmt->execute([':id' => $admin['id']]);
-    $currentUser = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    if (!$currentUser) {
-        $db->sendError('Admin not found', 404);
-    }
-    
-    $db->sendResponse([
-        'admin' => formatAdminData($currentUser)
-    ]);
-}
-
-// =============================================
-// 15. UPDATE CURRENT ADMIN PROFILE (ADDED NEW)
-// =============================================
-elseif ($method === 'PUT' && $action === 'update-profile') {
-    $data = json_decode(file_get_contents('php://input'), true);
-    
-    $fields = [];
-    $params = [':id' => $admin['id']];
-    
-    $allowedFields = ['full_name', 'phone'];
-    
-    foreach ($allowedFields as $field) {
-        if (isset($data[$field])) {
-            $fields[] = "$field = :$field";
-            $params[":$field"] = $data[$field];
-        }
-    }
-    
-    // Handle avatar update
-    if (isset($data['avatar_url'])) {
-        $avatarUrl = $data['avatar_url'];
-        if (!empty($avatarUrl) && strpos($avatarUrl, $baseUrl) === 0) {
-            $avatarUrl = str_replace($baseUrl . '/uploads/admin_avatars/', '', $avatarUrl);
-        }
-        $fields[] = "avatar_url = :avatar_url";
-        $params[':avatar_url'] = $avatarUrl;
-    }
-    
-    // Handle password update
-    if (isset($data['current_password']) && isset($data['new_password'])) {
-        // Verify current password
-        $stmt = $conn->prepare("SELECT password_hash FROM admin_users WHERE id = :id");
-        $stmt->execute([':id' => $admin['id']]);
-        $adminData = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if (!password_verify($data['current_password'], $adminData['password_hash'])) {
-            $db->sendError('Current password is incorrect', 400);
-        }
-        
-        $fields[] = "password_hash = :password";
-        $params[':password'] = password_hash($data['new_password'], PASSWORD_DEFAULT);
-    }
-    
-    if (empty($fields)) {
-        $db->sendError('No fields to update', 400);
-    }
-    
-    $fields[] = "updated_at = NOW()";
-    $sql = "UPDATE admin_users SET " . implode(', ', $fields) . " WHERE id = :id";
-    $stmt = $conn->prepare($sql);
-    $stmt->execute($params);
-    
-    $db->sendResponse([], 'Profile updated successfully');
-}
-
-// =============================================
 // Invalid action handler
 // =============================================
 else {
-    $db->sendError('Invalid action. Available actions: list, details, create, update, delete, toggle-status, toggle-lock, sessions, revoke-session, stats, bulk-status, reset-password, export, profile, update-profile, upload-avatar', 400);
+    $db->sendError('Invalid action. Available actions: list, details, create, update, delete, toggle-status, toggle-lock, sessions, revoke-session, stats, bulk-status, reset-password, export', 400);
 }
 ?>
