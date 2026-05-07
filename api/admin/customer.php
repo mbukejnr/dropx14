@@ -3,6 +3,12 @@
 // COMPLETE ADMIN CUSTOMER MANAGEMENT API - FIXED FOR PHP 8.1+
 
 // =============================================
+// TURN OFF WARNINGS FOR CLEAN JSON OUTPUT
+// =============================================
+error_reporting(E_ERROR | E_PARSE);
+ini_set('display_errors', 0);
+
+// =============================================
 // CORS CONFIGURATION
 // =============================================
 $production_frontend = getenv('FRONTEND_URL') ?: 'https://frontend-pink-pi-70.vercel.app';
@@ -245,6 +251,7 @@ elseif ($method === 'POST' && $action === 'create') {
     
     $newCustomerId = $conn->lastInsertId();
     
+    // Create wallet for new customer
     $walletStmt = $conn->prepare("
         INSERT INTO dropx_wallets (user_id, balance, currency, is_active, created_at, updated_at)
         VALUES (:user_id, 0, 'MWK', 1, NOW(), NOW())
@@ -600,9 +607,6 @@ elseif ($method === 'GET' && $action === 'export') {
     }
     $stmt->execute();
     $customers = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-    // Turn off error reporting for CSV output to prevent warnings
-    error_reporting(0);
     
     // Clear any output buffers
     while (ob_get_level()) {
