@@ -1,10 +1,10 @@
 <?php
 // backend/api/admin/admin_notifications.php
-// COMPLETE NOTIFICATION SYSTEM - FULL PRODUCTION VERSION
+// COMPLETE NOTIFICATION SYSTEM - FULL VERSION
 
-/*********************************
- * CORS Configuration
- *********************************/
+// =============================================
+// CORS HEADERS
+// =============================================
 $allowed_origins = [
     'https://frontend-pink-pi-70.vercel.app',
     'https://dropxdelivery.com',
@@ -23,7 +23,8 @@ if (in_array($origin, $allowed_origins)) {
 
 header("Access-Control-Allow-Credentials: true");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-User-Id");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
+header("Access-Control-Expose-Headers: Content-Disposition");
 header("Content-Type: application/json; charset=UTF-8");
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -31,56 +32,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-/*********************************
- * SESSION CONFIG
- *********************************/
-if (session_status() === PHP_SESSION_NONE) {
-    session_set_cookie_params([
-        'lifetime' => 86400 * 30,
-        'path' => '/',
-        'domain' => '',
-        'secure' => true,
-        'httponly' => true,
-        'samesite' => 'None'
-    ]);
-    session_start();
-}
+// =============================================
+// REQUIRE AUTH FILES
+// =============================================
+require_once __DIR__ . '/../../config/admin_database.php';
+require_once __DIR__ . '/../../includes/admin_auth.php';
 
-require_once __DIR__ . '/../../config/database.php';
-require_once __DIR__ . '/../../includes/ResponseHandler.php';
-
-// Check admin authentication
-if (empty($_SESSION['admin_id']) && empty($_SESSION['user_id'])) {
-    ResponseHandler::error('Unauthorized - Admin login required', 401);
-}
-
-$db = new Database();
+$db = AdminDatabase::getInstance();
 $conn = $db->getConnection();
+$auth = new AdminAuth();
+
+$admin = $auth->validateToken();
+
+if (!$admin) {
+    exit();
+}
 
 $method = $_SERVER['REQUEST_METHOD'];
 $action = isset($_GET['action']) ? $_GET['action'] : '';
+$notificationId = isset($_GET['id']) ? intval($_GET['id']) : null;
 
-/*********************************
- * FIREBASE CONFIGURATION - FROM ENVIRONMENT VARIABLES
- *********************************/
+function checkPermission($permission, $auth, $db) {
+    if (!$auth->hasPermission($permission)) {
+        $db->sendForbidden("You don't have permission to perform this action. Required: $permission");
+    }
+}
+
+// =============================================
+// FIREBASE CONFIGURATION
+// =============================================
 $firebaseServiceAccountJson = getenv('FIREBASE_SERVICE_ACCOUNT') ?: ($_ENV['FIREBASE_SERVICE_ACCOUNT'] ?? '');
 $firebaseProjectId = getenv('FIREBASE_PROJECT_ID') ?: ($_ENV['FIREBASE_PROJECT_ID'] ?? 'dropxdelivery-80');
 
-/*********************************
- * MAILERSEND CONFIGURATION - FROM ENVIRONMENT VARIABLES
- *********************************/
+// =============================================
+// MAILERSEND CONFIGURATION
+// =============================================
 $mailersendApiKey = getenv('MAILERSEND_API_KEY') ?: ($_ENV['MAILERSEND_API_KEY'] ?? '');
 $mailersendFromEmail = getenv('MAILERSEND_FROM_EMAIL') ?: ($_ENV['MAILERSEND_FROM_EMAIL'] ?? 'notifications@dropx.mlsender.net');
 $mailersendFromName = getenv('MAILERSEND_FROM_NAME') ?: ($_ENV['MAILERSEND_FROM_NAME'] ?? 'DropX Admin');
 
-/*********************************
- * FUNCTION: Create and Exchange JWT for FCM Token
- *********************************/
+// =============================================
+// FCM FUNCTIONS
+// =============================================
 function createAndExchangeJWT($serviceAccount) {
-    // Create JWT header
     $jwtHeader = base64_encode(json_encode(['alg' => 'RS256', 'typ' => 'JWT']));
-    
-    // Create JWT payload
     $now = time();
     $jwtPayload = base64_encode(json_encode([
         'iss' => $serviceAccount['client_email'],
@@ -90,13 +85,11 @@ function createAndExchangeJWT($serviceAccount) {
         'iat' => $now
     ]));
     
-    // Sign JWT
     $privateKey = $serviceAccount['private_key'];
     $signature = '';
     openssl_sign($jwtHeader . '.' . $jwtPayload, $signature, $privateKey, OPENSSL_ALGO_SHA256);
     $jwt = $jwtHeader . '.' . $jwtPayload . '.' . base64_encode($signature);
     
-    // Exchange for access token
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, 'https://oauth2.googleapis.com/token');
     curl_setopt($ch, CURLOPT_POST, true);
@@ -115,54 +108,33 @@ function createAndExchangeJWT($serviceAccount) {
     
     if ($httpCode === 200) {
         $data = json_decode($response, true);
-        $token = $data['access_token'] ?? null;
-        if ($token) {
-            error_log("✅ FCM Access token obtained successfully");
-        }
-        return $token;
+        return $data['access_token'] ?? null;
     }
-    
-    error_log("❌ FCM token exchange failed: HTTP $httpCode");
     return null;
 }
 
-/*********************************
- * FUNCTION: Get FCM Access Token
- *********************************/
 function getFCMAccessToken() {
     global $firebaseServiceAccountJson;
     
-    // Try environment variable first (Railway production)
     if (!empty($firebaseServiceAccountJson)) {
         $serviceAccount = json_decode($firebaseServiceAccountJson, true);
         if ($serviceAccount && isset($serviceAccount['client_email'], $serviceAccount['private_key'])) {
-            error_log("✅ Using Firebase credentials from environment variable");
             return createAndExchangeJWT($serviceAccount);
         }
-        error_log("❌ Invalid Firebase credentials in environment variable");
     }
     
-    // Fallback to file for local development
     $filePath = __DIR__ . '/../../config/firebase-service-account.json';
     if (file_exists($filePath)) {
-        error_log("📁 Firebase credentials file found, using for local development");
         $serviceAccount = json_decode(file_get_contents($filePath), true);
         if ($serviceAccount && isset($serviceAccount['client_email'], $serviceAccount['private_key'])) {
             return createAndExchangeJWT($serviceAccount);
         }
-        error_log("❌ Invalid Firebase credentials in file");
     }
-    
-    error_log("❌ No Firebase credentials found in environment or file");
     return null;
 }
 
-/*********************************
- * FUNCTION: Send Push Notification
- *********************************/
 function sendPushNotification($deviceToken, $title, $message, $type = 'general', $data = []) {
     global $firebaseProjectId;
-    
     if (empty($deviceToken)) return false;
     
     $accessToken = getFCMAccessToken();
@@ -171,17 +143,8 @@ function sendPushNotification($deviceToken, $title, $message, $type = 'general',
     $payload = [
         'message' => [
             'token' => $deviceToken,
-            'notification' => [
-                'title' => $title,
-                'body' => $message,
-                'sound' => 'default'
-            ],
-            'data' => array_merge([
-                'type' => $type,
-                'title' => $title,
-                'message' => $message,
-                'timestamp' => date('c')
-            ], $data),
+            'notification' => ['title' => $title, 'body' => $message, 'sound' => 'default'],
+            'data' => array_merge(['type' => $type, 'title' => $title, 'message' => $message, 'timestamp' => date('c')], $data),
             'android' => ['priority' => 'high'],
             'apns' => ['payload' => ['aps' => ['sound' => 'default']]]
         ]
@@ -192,35 +155,19 @@ function sendPushNotification($deviceToken, $title, $message, $type = 'general',
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Authorization: Bearer ' . $accessToken,
-        'Content-Type: application/json'
-    ]);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: Bearer ' . $accessToken, 'Content-Type: application/json']);
     curl_setopt($ch, CURLOPT_TIMEOUT, 30);
     
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
     
-    if ($httpCode === 200) {
-        error_log("✅ Push sent to: " . substr($deviceToken, 0, 20) . "...");
-        return true;
-    }
-    
-    error_log("❌ Push failed: HTTP $httpCode");
-    return false;
+    return $httpCode === 200;
 }
 
-/*********************************
- * FUNCTION: Send Email Notification
- *********************************/
 function sendEmailNotification($email, $subject, $message) {
     global $mailersendApiKey, $mailersendFromEmail, $mailersendFromName;
-    
-    if (empty($mailersendApiKey)) {
-        error_log("❌ No MailerSend API key");
-        return false;
-    }
+    if (empty($mailersendApiKey)) return false;
     
     $html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>$subject</title></head><body>
         <div style='max-width:600px;margin:0 auto;padding:20px;font-family:Arial'>
@@ -249,567 +196,617 @@ function sendEmailNotification($email, $subject, $message) {
         'html' => $html
     ]));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Content-Type: application/json',
-        'Authorization: Bearer ' . $mailersendApiKey
-    ]);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json', 'Authorization: Bearer ' . $mailersendApiKey]);
     curl_setopt($ch, CURLOPT_TIMEOUT, 30);
     
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
     
-    if ($httpCode === 202 || $httpCode === 200) {
-        error_log("✅ Email sent to: $email");
-        return true;
-    }
-    
-    error_log("❌ Email failed to: $email - HTTP $httpCode");
-    return false;
+    return ($httpCode === 202 || $httpCode === 200);
 }
 
-/*********************************
- * FUNCTION: Create In-App Notification
- *********************************/
 function createInAppNotification($conn, $userId, $userType, $title, $message, $type, $actionUrl = null, $orderId = null) {
-    $stmt = $conn->prepare("
-        INSERT INTO user_notifications (user_id, user_type, title, message, type, action_url, order_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
-    ");
+    $stmt = $conn->prepare("INSERT INTO user_notifications (user_id, user_type, title, message, type, action_url, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())");
     return $stmt->execute([$userId, $userType, $title, $message, $type, $actionUrl, $orderId]);
 }
 
-/*********************************
- * 1. GET AUDIENCE COUNT
- *********************************/
-if ($method === 'GET' && $action === 'audience-count') {
-    $audience = $_GET['audience'] ?? 'all';
-    $result = ['total' => 0, 'emails' => 0, 'devices' => 0];
+// =============================================
+// 1. LIST NOTIFICATIONS
+// =============================================
+if ($method === 'GET' && $action === 'list') {
+    checkPermission('view_notifications', $auth, $db);
     
-    try {
-        if ($audience === 'all' || $audience === 'customers') {
-            $stmt = $conn->query("
-                SELECT 
-                    COUNT(*) as total,
-                    SUM(CASE WHEN email IS NOT NULL AND email != '' THEN 1 ELSE 0 END) as emails,
-                    SUM(CASE WHEN device_token IS NOT NULL AND device_token != '' THEN 1 ELSE 0 END) as devices 
-                FROM users
-            ");
-            $result = $stmt->fetch(PDO::FETCH_ASSOC);
-        } elseif ($audience === 'merchants') {
-            $stmt = $conn->query("
-                SELECT 
-                    COUNT(*) as total,
-                    SUM(CASE WHEN email IS NOT NULL AND email != '' THEN 1 ELSE 0 END) as emails,
-                    SUM(CASE WHEN device_token IS NOT NULL AND device_token != '' THEN 1 ELSE 0 END) as devices 
-                FROM merchants
-            ");
-            $result = $stmt->fetch(PDO::FETCH_ASSOC);
-        }
-    } catch (PDOException $e) {
-        error_log("Audience count error: " . $e->getMessage());
-    }
-    
-    ResponseHandler::success([
-        'total' => (int)$result['total'],
-        'emails' => (int)$result['emails'],
-        'push_devices' => (int)$result['devices']
-    ]);
-}
-
-/*********************************
- * 2. CREATE AND SEND NOTIFICATION
- *********************************/
-elseif ($method === 'POST' && $action === 'create') {
-    $data = json_decode(file_get_contents('php://input'), true);
-    
-    if (empty($data['title']) || empty($data['message'])) {
-        ResponseHandler::error('Title and message are required', 400);
-    }
-    
-    // Get recipients based on audience
-    $recipients = [];
-    $audience = $data['audience'] ?? 'all';
-    
-    try {
-        if ($audience === 'all' || $audience === 'customers') {
-            $stmt = $conn->query("SELECT id, email, device_token, 'user' as type FROM users");
-            $recipients = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        } elseif ($audience === 'merchants') {
-            $stmt = $conn->query("SELECT id, email, device_token, 'merchant' as type FROM merchants");
-            $recipients = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        }
-    } catch (PDOException $e) {
-        error_log("Get recipients error: " . $e->getMessage());
-    }
-    
-    if (empty($recipients)) {
-        ResponseHandler::error('No recipients found for selected audience', 400);
-    }
-    
-    // Save notification record
-    $stmt = $conn->prepare("
-        INSERT INTO admin_notifications (
-            title, message, type, audience, image_url, action_url, target_count, 
-            send_push, send_email, send_in_app, status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sent', NOW())
-    ");
-    
-    $stmt->execute([
-        $data['title'],
-        $data['message'],
-        $data['type'] ?? 'general',
-        $audience,
-        $data['image_url'] ?? null,
-        $data['action_url'] ?? null,
-        count($recipients),
-        isset($data['send_push']) ? (int)$data['send_push'] : 1,
-        isset($data['send_email']) ? (int)$data['send_email'] : 0,
-        isset($data['send_in_app']) ? (int)$data['send_in_app'] : 1
-    ]);
-    
-    $notificationId = $conn->lastInsertId();
-    
-    // Send notifications
-    $pushSent = 0;
-    $emailSent = 0;
-    $inAppSent = 0;
-    
-    foreach ($recipients as $recipient) {
-        // In-app notification
-        if ($data['send_in_app'] ?? true) {
-            if (createInAppNotification($conn, $recipient['id'], $recipient['type'], $data['title'], $data['message'], $data['type'] ?? 'general', $data['action_url'] ?? null)) {
-                $inAppSent++;
-            }
-        }
-        
-        // Push notification
-        if (($data['send_push'] ?? true) && !empty($recipient['device_token'])) {
-            if (sendPushNotification($recipient['device_token'], $data['title'], $data['message'], $data['type'] ?? 'general', ['notification_id' => $notificationId])) {
-                $pushSent++;
-            }
-            usleep(50000); // Rate limit
-        }
-        
-        // Email notification
-        if (($data['send_email'] ?? false) && !empty($recipient['email'])) {
-            if (sendEmailNotification($recipient['email'], $data['title'], $data['message'])) {
-                $emailSent++;
-            }
-            usleep(100000);
-        }
-    }
-    
-    // Update stats
-    $stmt = $conn->prepare("
-        UPDATE admin_notifications 
-        SET sent_count = ?, push_sent_count = ?, email_sent_count = ?, in_app_sent_count = ?, sent_at = NOW() 
-        WHERE id = ?
-    ");
-    $stmt->execute([count($recipients), $pushSent, $emailSent, $inAppSent, $notificationId]);
-    
-    ResponseHandler::success([
-        'notification_id' => $notificationId,
-        'total_recipients' => count($recipients),
-        'push_sent' => $pushSent,
-        'email_sent' => $emailSent,
-        'in_app_sent' => $inAppSent
-    ], 'Notification sent successfully');
-}
-
-/*********************************
- * 3. LIST NOTIFICATIONS (Admin)
- *********************************/
-elseif ($method === 'GET' && $action === 'list') {
-    $page = max(1, $_GET['page'] ?? 1);
-    $limit = min(50, $_GET['limit'] ?? 20);
+    $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
+    $limit = isset($_GET['limit']) ? min(100, max(1, intval($_GET['limit']))) : 20;
+    $type = isset($_GET['type']) ? $_GET['type'] : '';
+    $status = isset($_GET['status']) ? $_GET['status'] : '';
     $offset = ($page - 1) * $limit;
     
     $where = [];
     $params = [];
     
-    if (!empty($_GET['type']) && $_GET['type'] !== 'all') {
-        $where[] = "type = ?";
-        $params[] = $_GET['type'];
+    if ($type && $type !== 'all') {
+        $where[] = "n.type = :type";
+        $params[':type'] = $type;
     }
-    if (!empty($_GET['status']) && $_GET['status'] !== 'all') {
-        $where[] = "status = ?";
-        $params[] = $_GET['status'];
+    if ($status && $status !== 'all') {
+        $where[] = "n.status = :status";
+        $params[':status'] = $status;
     }
     
     $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
     
-    // Get total count
-    $stmt = $conn->prepare("SELECT COUNT(*) FROM admin_notifications $whereClause");
-    $stmt->execute($params);
-    $total = $stmt->fetchColumn();
+    $countSql = "SELECT COUNT(*) as total FROM admin_notifications n $whereClause";
+    $countStmt = $conn->prepare($countSql);
+    $countStmt->execute($params);
+    $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
     
-    // Get notifications
-    $sql = "SELECT * FROM admin_notifications $whereClause ORDER BY created_at DESC LIMIT $limit OFFSET $offset";
+    $sql = "SELECT n.*, a.full_name as created_by_name FROM admin_notifications n LEFT JOIN admin_users a ON n.created_by = a.id $whereClause ORDER BY n.created_at DESC LIMIT :limit OFFSET :offset";
     $stmt = $conn->prepare($sql);
-    $stmt->execute($params);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+    foreach ($params as $key => $value) {
+        $stmt->bindValue($key, $value);
+    }
+    $stmt->execute();
     $notifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // Get stats
     $stats = [
         'total' => $conn->query("SELECT COUNT(*) FROM admin_notifications")->fetchColumn(),
         'sent' => $conn->query("SELECT COUNT(*) FROM admin_notifications WHERE status = 'sent'")->fetchColumn(),
-        'scheduled' => $conn->query("SELECT COUNT(*) FROM admin_notifications WHERE status = 'scheduled'")->fetchColumn()
+        'draft' => $conn->query("SELECT COUNT(*) FROM admin_notifications WHERE status = 'draft'")->fetchColumn(),
+        'scheduled' => $conn->query("SELECT COUNT(*) FROM admin_notifications WHERE status = 'scheduled'")->fetchColumn(),
+        'failed' => $conn->query("SELECT COUNT(*) FROM admin_notifications WHERE status = 'failed'")->fetchColumn()
     ];
     
-    ResponseHandler::success([
+    $db->sendResponse([
         'notifications' => $notifications,
         'stats' => $stats,
-        'pagination' => [
-            'current_page' => $page,
-            'total' => (int)$total,
-            'total_pages' => ceil($total / $limit)
-        ]
+        'pagination' => ['current_page' => $page, 'per_page' => $limit, 'total' => intval($total), 'total_pages' => ceil($total / $limit)]
     ]);
 }
 
-/*********************************
- * 4. DELETE NOTIFICATION
- *********************************/
-elseif ($method === 'DELETE' && $action === 'delete') {
-    $id = (int)($_GET['id'] ?? 0);
+// =============================================
+// 2. GET NOTIFICATION DETAILS
+// =============================================
+elseif ($method === 'GET' && $notificationId && $action === 'details') {
+    checkPermission('view_notifications', $auth, $db);
     
-    if (!$id) {
-        ResponseHandler::error('Notification ID required', 400);
+    $stmt = $conn->prepare("SELECT n.*, a.full_name as created_by_name FROM admin_notifications n LEFT JOIN admin_users a ON n.created_by = a.id WHERE n.id = :id");
+    $stmt->execute([':id' => $notificationId]);
+    $notification = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$notification) {
+        $db->sendError('Notification not found', 404);
     }
     
-    $conn->prepare("DELETE FROM notification_delivery WHERE notification_id = ?")->execute([$id]);
-    $conn->prepare("DELETE FROM admin_notifications WHERE id = ?")->execute([$id]);
+    $deliveryStmt = $conn->prepare("SELECT COUNT(*) as total, SUM(CASE WHEN delivered_at IS NOT NULL THEN 1 ELSE 0 END) as delivered, SUM(CASE WHEN read_at IS NOT NULL THEN 1 ELSE 0 END) as read_count, SUM(CASE WHEN clicked_at IS NOT NULL THEN 1 ELSE 0 END) as clicked FROM notification_delivery WHERE notification_id = :id");
+    $deliveryStmt->execute([':id' => $notificationId]);
+    $deliveryStats = $deliveryStmt->fetch(PDO::FETCH_ASSOC);
+    $notification['delivery_stats'] = $deliveryStats;
     
-    ResponseHandler::success([], 'Notification deleted');
+    $db->sendResponse(['notification' => $notification]);
 }
 
-/*********************************
- * 5. BULK DELETE NOTIFICATIONS
- *********************************/
-elseif ($method === 'POST' && $action === 'bulk-delete') {
-    $data = json_decode(file_get_contents('php://input'), true);
-    $ids = $data['notification_ids'] ?? [];
+// =============================================
+// 3. CREATE AND SEND NOTIFICATION
+// =============================================
+elseif ($method === 'POST' && $action === 'create') {
+    checkPermission('create_notifications', $auth, $db);
     
-    if (empty($ids) || !is_array($ids)) {
-        ResponseHandler::error('Notification IDs array required', 400);
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    if (empty($data['title'])) {
+        $db->sendError('Title is required', 400);
+    }
+    if (empty($data['message'])) {
+        $db->sendError('Message is required', 400);
     }
     
+    $type = $data['type'] ?? 'general';
+    $audience = $data['audience'] ?? 'all';
+    $imageUrl = $data['image_url'] ?? null;
+    $actionUrl = $data['action_url'] ?? null;
+    $sendPush = isset($data['send_push']) ? (bool)$data['send_push'] : true;
+    $sendEmail = isset($data['send_email']) ? (bool)$data['send_email'] : false;
+    $sendInApp = isset($data['send_in_app']) ? (bool)$data['send_in_app'] : true;
+    $scheduleDate = !empty($data['schedule_date']) ? $data['schedule_date'] : null;
+    
+    $targetUsers = [];
+    $targetCount = 0;
+    
+    if ($audience === 'all' || $audience === 'customers') {
+        $userStmt = $conn->query("SELECT id, email, device_token FROM users WHERE is_active = 1");
+        $targetUsers = $userStmt->fetchAll(PDO::FETCH_ASSOC);
+        $targetCount = count($targetUsers);
+    } elseif ($audience === 'merchants') {
+        $merchantStmt = $conn->query("SELECT id, email, device_token FROM merchants WHERE is_active = 1");
+        $targetUsers = $merchantStmt->fetchAll(PDO::FETCH_ASSOC);
+        $targetCount = count($targetUsers);
+    }
+    
+    $status = $scheduleDate ? 'scheduled' : 'sent';
+    
+    $stmt = $conn->prepare("INSERT INTO admin_notifications (title, message, type, audience, image_url, action_url, target_count, send_push, send_email, send_in_app, status, scheduled_at, created_by, created_at) VALUES (:title, :message, :type, :audience, :image_url, :action_url, :target_count, :send_push, :send_email, :send_in_app, :status, :scheduled_at, :created_by, NOW())");
+    
+    $stmt->execute([
+        ':title' => $data['title'],
+        ':message' => $data['message'],
+        ':type' => $type,
+        ':audience' => $audience,
+        ':image_url' => $imageUrl,
+        ':action_url' => $actionUrl,
+        ':target_count' => $targetCount,
+        ':send_push' => $sendPush ? 1 : 0,
+        ':send_email' => $sendEmail ? 1 : 0,
+        ':send_in_app' => $sendInApp ? 1 : 0,
+        ':status' => $status,
+        ':scheduled_at' => $scheduleDate,
+        ':created_by' => $admin['id']
+    ]);
+    
+    $notificationId = $conn->lastInsertId();
+    
+    if (!$scheduleDate) {
+        $deliveredCount = 0;
+        $emailSentCount = 0;
+        $pushSentCount = 0;
+        $inAppCount = 0;
+        
+        foreach ($targetUsers as $user) {
+            $deliveryStmt = $conn->prepare("INSERT INTO notification_delivery (notification_id, user_id, user_type, created_at) VALUES (:notification_id, :user_id, :user_type, NOW())");
+            $deliveryStmt->execute([':notification_id' => $notificationId, ':user_id' => $user['id'], ':user_type' => $audience === 'merchants' ? 'merchant' : 'user']);
+            $deliveredCount++;
+            
+            if ($sendEmail && !empty($user['email'])) {
+                if (sendEmailNotification($user['email'], $data['title'], $data['message'])) {
+                    $emailSentCount++;
+                }
+                usleep(100000);
+            }
+            
+            if ($sendPush && !empty($user['device_token'])) {
+                if (sendPushNotification($user['device_token'], $data['title'], $data['message'], $type, ['notification_id' => $notificationId])) {
+                    $pushSentCount++;
+                }
+                usleep(50000);
+            }
+            
+            if ($sendInApp) {
+                createInAppNotification($conn, $user['id'], $audience === 'merchants' ? 'merchant' : 'user', $data['title'], $data['message'], $type, $actionUrl);
+                $inAppCount++;
+            }
+        }
+        
+        $updateStmt = $conn->prepare("UPDATE admin_notifications SET sent_count = :sent_count, email_sent_count = :email_sent_count, push_sent_count = :push_sent_count, in_app_sent_count = :in_app_sent_count, sent_at = NOW(), status = 'sent' WHERE id = :id");
+        $updateStmt->execute([':sent_count' => $deliveredCount, ':email_sent_count' => $emailSentCount, ':push_sent_count' => $pushSentCount, ':in_app_sent_count' => $inAppCount, ':id' => $notificationId]);
+        
+        $db->sendResponse(['id' => $notificationId, 'delivered_count' => $deliveredCount, 'email_sent_count' => $emailSentCount, 'push_sent_count' => $pushSentCount, 'in_app_sent_count' => $inAppCount], 'Notification sent successfully', 201);
+    } else {
+        $db->sendResponse(['id' => $notificationId, 'scheduled_at' => $scheduleDate], 'Notification scheduled successfully', 201);
+    }
+}
+
+// =============================================
+// 4. UPDATE NOTIFICATION
+// =============================================
+elseif ($method === 'PUT' && $notificationId && $action === 'update') {
+    checkPermission('edit_notifications', $auth, $db);
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    $fields = [];
+    $params = [':id' => $notificationId];
+    $allowedFields = ['title', 'message', 'type', 'audience', 'image_url', 'action_url', 'status'];
+    
+    foreach ($allowedFields as $field) {
+        if (isset($data[$field])) {
+            $fields[] = "$field = :$field";
+            $params[":$field"] = $data[$field];
+        }
+    }
+    
+    if (empty($fields)) {
+        $db->sendError('No fields to update', 400);
+    }
+    
+    $fields[] = "updated_at = NOW()";
+    $sql = "UPDATE admin_notifications SET " . implode(', ', $fields) . " WHERE id = :id";
+    $stmt = $conn->prepare($sql);
+    $stmt->execute($params);
+    
+    $db->sendResponse([], 'Notification updated successfully');
+}
+
+// =============================================
+// 5. DELETE NOTIFICATION
+// =============================================
+elseif ($method === 'DELETE' && $notificationId && $action === 'delete') {
+    checkPermission('delete_notifications', $auth, $db);
+    
+    $delStmt = $conn->prepare("DELETE FROM notification_delivery WHERE notification_id = :id");
+    $delStmt->execute([':id' => $notificationId]);
+    $stmt = $conn->prepare("DELETE FROM admin_notifications WHERE id = :id");
+    $stmt->execute([':id' => $notificationId]);
+    
+    $db->sendResponse([], 'Notification deleted successfully');
+}
+
+// =============================================
+// 6. BULK DELETE NOTIFICATIONS
+// =============================================
+elseif ($method === 'POST' && $action === 'bulk-delete') {
+    checkPermission('delete_notifications', $auth, $db);
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    if (empty($data['notification_ids']) || !is_array($data['notification_ids'])) {
+        $db->sendError('notification_ids array is required', 400);
+    }
+    
+    $ids = array_map('intval', $data['notification_ids']);
     $placeholders = implode(',', array_fill(0, count($ids), '?'));
-    $conn->prepare("DELETE FROM notification_delivery WHERE notification_id IN ($placeholders)")->execute($ids);
+    
+    $delStmt = $conn->prepare("DELETE FROM notification_delivery WHERE notification_id IN ($placeholders)");
+    $delStmt->execute($ids);
     $stmt = $conn->prepare("DELETE FROM admin_notifications WHERE id IN ($placeholders)");
     $stmt->execute($ids);
     
-    ResponseHandler::success(['deleted_count' => $stmt->rowCount()], 'Notifications deleted');
+    $db->sendResponse(['deleted_count' => $stmt->rowCount()], 'Notifications deleted successfully');
 }
 
-/*********************************
- * 6. GET USER NOTIFICATIONS (Mobile)
- *********************************/
-elseif ($method === 'GET' && $action === 'user-notifications') {
-    $userId = (int)($_GET['user_id'] ?? 0);
-    $page = max(1, $_GET['page'] ?? 1);
-    $limit = min(50, $_GET['limit'] ?? 20);
-    $offset = ($page - 1) * $limit;
-    
-    if (!$userId) {
-        ResponseHandler::error('User ID required', 400);
-    }
-    
-    // Get unread count
-    $stmt = $conn->prepare("SELECT COUNT(*) FROM user_notifications WHERE user_id = ? AND is_read = 0");
-    $stmt->execute([$userId]);
-    $unreadCount = $stmt->fetchColumn();
-    
-    // Get notifications
-    $stmt = $conn->prepare("
-        SELECT * FROM user_notifications 
-        WHERE user_id = ? 
-        ORDER BY created_at DESC 
-        LIMIT ? OFFSET ?
-    ");
-    $stmt->execute([$userId, $limit, $offset]);
-    $notifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-    ResponseHandler::success([
-        'notifications' => $notifications,
-        'unread_count' => (int)$unreadCount
-    ]);
-}
-
-/*********************************
- * 7. MARK NOTIFICATION AS READ (Mobile)
- *********************************/
-elseif ($method === 'POST' && $action === 'mark-read') {
-    $data = json_decode(file_get_contents('php://input'), true);
-    $notificationId = (int)($data['notification_id'] ?? 0);
-    $userId = (int)($data['user_id'] ?? 0);
-    
-    $stmt = $conn->prepare("UPDATE user_notifications SET is_read = 1, read_at = NOW() WHERE id = ? AND user_id = ?");
-    $stmt->execute([$notificationId, $userId]);
-    
-    ResponseHandler::success([], 'Marked as read');
-}
-
-/*********************************
- * 8. MARK ALL NOTIFICATIONS AS READ (Mobile)
- *********************************/
-elseif ($method === 'POST' && $action === 'mark-all-read') {
-    $data = json_decode(file_get_contents('php://input'), true);
-    $userId = (int)($data['user_id'] ?? 0);
-    
-    if (!$userId) {
-        ResponseHandler::error('User ID required', 400);
-    }
-    
-    $stmt = $conn->prepare("UPDATE user_notifications SET is_read = 1, read_at = NOW() WHERE user_id = ? AND is_read = 0");
-    $stmt->execute([$userId]);
-    
-    ResponseHandler::success([], 'All notifications marked as read');
-}
-
-/*********************************
- * 9. UPDATE DEVICE TOKEN (Mobile)
- *********************************/
-elseif ($method === 'POST' && $action === 'update-device-token') {
-    $data = json_decode(file_get_contents('php://input'), true);
-    
-    $userId = (int)($data['user_id'] ?? 0);
-    $deviceToken = $data['device_token'] ?? '';
-    $devicePlatform = $data['device_platform'] ?? 'android';
-    $userType = $data['user_type'] ?? 'user';
-    
-    if (!$userId || !$deviceToken) {
-        ResponseHandler::error('User ID and device token required', 400);
-    }
-    
-    try {
-        if ($userType === 'merchant') {
-            $stmt = $conn->prepare("UPDATE merchants SET device_token = ?, device_platform = ? WHERE id = ?");
-        } else {
-            $stmt = $conn->prepare("UPDATE users SET device_token = ?, device_platform = ? WHERE id = ?");
-        }
-        $stmt->execute([$deviceToken, $devicePlatform, $userId]);
-        
-        ResponseHandler::success([], 'Device token updated');
-    } catch (PDOException $e) {
-        ResponseHandler::error('Failed to update device token', 500);
-    }
-}
-
-/*********************************
- * 10. GET NOTIFICATION STATS
- *********************************/
+// =============================================
+// 7. GET NOTIFICATION STATS
+// =============================================
 elseif ($method === 'GET' && $action === 'stats') {
-    $daily = $conn->query("
-        SELECT DATE(created_at) as date, COUNT(*) as count, SUM(sent_count) as delivered
-        FROM admin_notifications 
-        WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-        GROUP BY DATE(created_at)
-        ORDER BY date ASC
-    ")->fetchAll(PDO::FETCH_ASSOC);
+    checkPermission('view_notifications', $auth, $db);
     
-    $byType = $conn->query("
-        SELECT type, COUNT(*) as count 
-        FROM admin_notifications 
-        GROUP BY type
-    ")->fetchAll(PDO::FETCH_ASSOC);
+    $dailyStmt = $conn->query("SELECT DATE(created_at) as date, COUNT(*) as sent, SUM(sent_count) as delivered, SUM(email_sent_count) as emails, SUM(push_sent_count) as pushes, SUM(in_app_sent_count) as in_app FROM admin_notifications WHERE status = 'sent' AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) GROUP BY DATE(created_at) ORDER BY date ASC");
+    $stats['daily'] = $dailyStmt->fetchAll(PDO::FETCH_ASSOC);
     
-    ResponseHandler::success([
-        'daily' => $daily,
-        'by_type' => $byType
-    ]);
+    $typeStmt = $conn->query("SELECT type, COUNT(*) as count FROM admin_notifications GROUP BY type");
+    $stats['by_type'] = $typeStmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    $overallStmt = $conn->query("SELECT SUM(sent_count) as total_delivered, SUM(email_sent_count) as total_emails, SUM(push_sent_count) as total_pushes, SUM(in_app_sent_count) as total_in_app FROM admin_notifications WHERE status = 'sent'");
+    $stats['overall'] = $overallStmt->fetch(PDO::FETCH_ASSOC);
+    
+    $db->sendResponse(['stats' => $stats]);
 }
 
-/*********************************
- * 11. GET NOTIFICATION DETAILS
- *********************************/
-elseif ($method === 'GET' && $action === 'details') {
-    $id = (int)($_GET['id'] ?? 0);
+// =============================================
+// 8. GET NOTIFICATION TEMPLATES
+// =============================================
+elseif ($method === 'GET' && $action === 'templates') {
+    checkPermission('view_notifications', $auth, $db);
     
-    if (!$id) {
-        ResponseHandler::error('Notification ID required', 400);
+    $tableCheck = $conn->query("SHOW TABLES LIKE 'notification_templates'");
+    if ($tableCheck->rowCount() > 0) {
+        $stmt = $conn->query("SELECT id, name, title, message, type, icon FROM notification_templates WHERE is_active = 1 ORDER BY name");
+        $templates = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } else {
+        $templates = [];
     }
     
-    $stmt = $conn->prepare("SELECT * FROM admin_notifications WHERE id = ?");
-    $stmt->execute([$id]);
-    $notification = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    if (!$notification) {
-        ResponseHandler::error('Notification not found', 404);
-    }
-    
-    // Get delivery stats
-    $stmt = $conn->prepare("
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN delivered_at IS NOT NULL THEN 1 ELSE 0 END) as delivered,
-            SUM(CASE WHEN read_at IS NOT NULL THEN 1 ELSE 0 END) as read_count
-        FROM notification_delivery 
-        WHERE notification_id = ?
-    ");
-    $stmt->execute([$id]);
-    $deliveryStats = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    $notification['delivery_stats'] = $deliveryStats;
-    
-    ResponseHandler::success(['notification' => $notification]);
+    $db->sendResponse(['templates' => $templates]);
 }
 
-/*********************************
- * 12. RESEND NOTIFICATION
- *********************************/
+// =============================================
+// 9. GET AUDIENCE COUNT
+// =============================================
+elseif ($method === 'GET' && $action === 'audience-count') {
+    checkPermission('view_notifications', $auth, $db);
+    
+    $audience = isset($_GET['audience']) ? $_GET['audience'] : 'all';
+    $count = 0;
+    $emails = 0;
+    $devices = 0;
+    
+    if ($audience === 'all' || $audience === 'customers') {
+        $stmt = $conn->query("SELECT COUNT(*) as total, SUM(CASE WHEN email IS NOT NULL AND email != '' THEN 1 ELSE 0 END) as emails, SUM(CASE WHEN device_token IS NOT NULL AND device_token != '' THEN 1 ELSE 0 END) as devices FROM users WHERE is_active = 1");
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        $count = $result['total'];
+        $emails = $result['emails'];
+        $devices = $result['devices'];
+    } elseif ($audience === 'merchants') {
+        $stmt = $conn->query("SELECT COUNT(*) as total, SUM(CASE WHEN email IS NOT NULL AND email != '' THEN 1 ELSE 0 END) as emails, SUM(CASE WHEN device_token IS NOT NULL AND device_token != '' THEN 1 ELSE 0 END) as devices FROM merchants WHERE is_active = 1");
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        $count = $result['total'];
+        $emails = $result['emails'];
+        $devices = $result['devices'];
+    }
+    
+    $db->sendResponse(['audience' => $audience, 'total' => intval($count), 'emails' => intval($emails), 'push_devices' => intval($devices), 'in_app' => intval($count)]);
+}
+
+// =============================================
+// 10. RESEND NOTIFICATION
+// =============================================
 elseif ($method === 'POST' && $action === 'resend') {
-    $id = (int)($_GET['id'] ?? 0);
+    checkPermission('create_notifications', $auth, $db);
     
+    $id = isset($_GET['id']) ? intval($_GET['id']) : 0;
     if (!$id) {
-        ResponseHandler::error('Notification ID required', 400);
+        $db->sendError('Notification ID required', 400);
     }
     
-    $stmt = $conn->prepare("SELECT * FROM admin_notifications WHERE id = ?");
-    $stmt->execute([$id]);
+    $stmt = $conn->prepare("SELECT * FROM admin_notifications WHERE id = :id");
+    $stmt->execute([':id' => $id]);
     $notification = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if (!$notification) {
-        ResponseHandler::error('Notification not found', 404);
+        $db->sendError('Notification not found', 404);
     }
     
-    // Get recipients again
     $recipients = [];
     if ($notification['audience'] === 'all' || $notification['audience'] === 'customers') {
-        $stmt = $conn->query("SELECT id, email, device_token, 'user' as type FROM users");
+        $stmt = $conn->query("SELECT id, email, device_token, 'user' as type FROM users WHERE is_active = 1");
         $recipients = $stmt->fetchAll(PDO::FETCH_ASSOC);
     } elseif ($notification['audience'] === 'merchants') {
-        $stmt = $conn->query("SELECT id, email, device_token, 'merchant' as type FROM merchants");
+        $stmt = $conn->query("SELECT id, email, device_token, 'merchant' as type FROM merchants WHERE is_active = 1");
         $recipients = $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
     
     $pushSent = 0;
     $emailSent = 0;
-    $inAppSent = 0;
     
     foreach ($recipients as $recipient) {
-        if ($notification['send_in_app']) {
-            if (createInAppNotification($conn, $recipient['id'], $recipient['type'], $notification['title'], $notification['message'], $notification['type'], $notification['action_url'])) {
-                $inAppSent++;
-            }
-        }
-        
         if ($notification['send_push'] && !empty($recipient['device_token'])) {
             if (sendPushNotification($recipient['device_token'], $notification['title'], $notification['message'], $notification['type'], ['notification_id' => $id])) {
                 $pushSent++;
             }
             usleep(50000);
         }
-        
         if ($notification['send_email'] && !empty($recipient['email'])) {
             if (sendEmailNotification($recipient['email'], $notification['title'], $notification['message'])) {
                 $emailSent++;
             }
             usleep(100000);
         }
+        if ($notification['send_in_app']) {
+            createInAppNotification($conn, $recipient['id'], $recipient['type'], $notification['title'], $notification['message'], $notification['type'], $notification['action_url']);
+        }
     }
     
-    // Update counts
-    $stmt = $conn->prepare("
-        UPDATE admin_notifications 
-        SET sent_count = sent_count + ?, 
-            push_sent_count = push_sent_count + ?, 
-            email_sent_count = email_sent_count + ?,
-            in_app_sent_count = in_app_sent_count + ?,
-            sent_at = NOW() 
-        WHERE id = ?
-    ");
-    $stmt->execute([count($recipients), $pushSent, $emailSent, $inAppSent, $id]);
+    $updateStmt = $conn->prepare("UPDATE admin_notifications SET sent_count = sent_count + :sent, push_sent_count = push_sent_count + :push, email_sent_count = email_sent_count + :email, sent_at = NOW() WHERE id = :id");
+    $updateStmt->execute([':sent' => count($recipients), ':push' => $pushSent, ':email' => $emailSent, ':id' => $id]);
     
-    ResponseHandler::success([
-        'total_recipients' => count($recipients),
-        'push_sent' => $pushSent,
-        'email_sent' => $emailSent,
-        'in_app_sent' => $inAppSent
-    ], 'Notification resent successfully');
+    $db->sendResponse(['total_recipients' => count($recipients), 'push_sent' => $pushSent, 'email_sent' => $emailSent], 'Notification resent successfully');
 }
 
-/*********************************
- * 13. EXPORT NOTIFICATIONS
- *********************************/
+// =============================================
+// 11. EXPORT NOTIFICATIONS TO CSV
+// =============================================
 elseif ($method === 'GET' && $action === 'export') {
-    $type = $_GET['type'] ?? '';
-    $status = $_GET['status'] ?? '';
+    checkPermission('view_notifications', $auth, $db);
+    
+    $type = isset($_GET['type']) ? $_GET['type'] : '';
+    $status = isset($_GET['status']) ? $_GET['status'] : '';
     
     $where = [];
     $params = [];
-    
     if ($type && $type !== 'all') {
-        $where[] = "type = ?";
-        $params[] = $type;
+        $where[] = "type = :type";
+        $params[':type'] = $type;
     }
     if ($status && $status !== 'all') {
-        $where[] = "status = ?";
-        $params[] = $status;
+        $where[] = "status = :status";
+        $params[':status'] = $status;
     }
     
     $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
     
-    $stmt = $conn->prepare("SELECT * FROM admin_notifications $whereClause ORDER BY created_at DESC");
-    $stmt->execute($params);
+    $sql = "SELECT * FROM admin_notifications n $whereClause ORDER BY n.created_at DESC";
+    $stmt = $conn->prepare($sql);
+    foreach ($params as $key => $value) {
+        $stmt->bindValue($key, $value);
+    }
+    $stmt->execute();
     $notifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    header('Content-Type: text/csv');
-    header('Content-Disposition: attachment; filename="notifications_' . date('Y-m-d') . '.csv"');
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
+    
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="notifications_export_' . date('Y-m-d_His') . '.csv"');
+    header('Cache-Control: must-revalidate, post-check=0, pre-check=0');
+    header('Expires: 0');
+    header('Pragma: public');
     
     $output = fopen('php://output', 'w');
-    fputcsv($output, ['ID', 'Title', 'Type', 'Audience', 'Status', 'Target Count', 'Sent Count', 'Push Sent', 'Email Sent', 'Created At']);
+    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
+    fputcsv($output, ['ID', 'Title', 'Type', 'Audience', 'Status', 'Target Count', 'Sent Count', 'Push Sent', 'Email Sent', 'Created At', 'Sent At']);
     
     foreach ($notifications as $n) {
         fputcsv($output, [
-            $n['id'],
-            $n['title'],
-            $n['type'],
-            $n['audience'],
-            $n['status'],
-            $n['target_count'],
-            $n['sent_count'],
-            $n['push_sent_count'],
-            $n['email_sent_count'],
-            $n['created_at']
+            $n['id'], $n['title'], $n['type'], $n['audience'], $n['status'],
+            $n['target_count'] ?? 0, $n['sent_count'] ?? 0,
+            $n['push_sent_count'] ?? 0, $n['email_sent_count'] ?? 0,
+            $n['created_at'] ?? '', $n['sent_at'] ?? ''
         ]);
     }
     fclose($output);
     exit();
 }
 
-/*********************************
- * 14. GET UNREAD COUNT (Mobile)
- *********************************/
-elseif ($method === 'GET' && $action === 'unread-count') {
-    $userId = (int)($_GET['user_id'] ?? 0);
+// =============================================
+// 12. SEND TEST PUSH NOTIFICATION
+// =============================================
+elseif ($method === 'POST' && $action === 'test-push') {
+    checkPermission('create_notifications', $auth, $db);
     
-    if (!$userId) {
-        ResponseHandler::error('User ID required', 400);
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    if (empty($data['device_token'])) {
+        $db->sendError('Device token is required', 400);
     }
     
-    $stmt = $conn->prepare("SELECT COUNT(*) FROM user_notifications WHERE user_id = ? AND is_read = 0");
-    $stmt->execute([$userId]);
+    $title = $data['title'] ?? 'Test Notification';
+    $message = $data['message'] ?? 'This is a test push notification from DROPX Admin';
+    
+    $result = sendPushNotification($data['device_token'], $title, $message, 'test');
+    
+    if ($result) {
+        $db->sendResponse([], 'Test push sent successfully');
+    } else {
+        $db->sendError('Failed to send test push. Check FCM credentials.', 500);
+    }
+}
+
+// =============================================
+// 13. SEND TEST EMAIL NOTIFICATION
+// =============================================
+elseif ($method === 'POST' && $action === 'test-email') {
+    checkPermission('create_notifications', $auth, $db);
+    
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    if (empty($data['email'])) {
+        $db->sendError('Email is required', 400);
+    }
+    
+    $title = $data['title'] ?? 'Test Email from DROPX';
+    $message = $data['message'] ?? 'Congratulations! Your notification system is working correctly.';
+    
+    $result = sendEmailNotification($data['email'], $title, $message);
+    
+    if ($result) {
+        $db->sendResponse([], 'Test email sent successfully');
+    } else {
+        $db->sendError('Failed to send test email. Check MailerSend API key.', 500);
+    }
+}
+
+// =============================================
+// 14. UPDATE DEVICE TOKEN (Mobile App)
+// =============================================
+elseif ($method === 'POST' && $action === 'update-device-token') {
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    $userId = $data['user_id'] ?? 0;
+    $deviceToken = $data['device_token'] ?? '';
+    $devicePlatform = $data['device_platform'] ?? 'android';
+    $userType = $data['user_type'] ?? 'user';
+    
+    if (!$userId || !$deviceToken) {
+        $db->sendError('User ID and device token required', 400);
+    }
+    
+    try {
+        if ($userType === 'merchant') {
+            $stmt = $conn->prepare("UPDATE merchants SET device_token = :token, device_platform = :platform WHERE id = :id");
+        } else {
+            $stmt = $conn->prepare("UPDATE users SET device_token = :token, device_platform = :platform WHERE id = :id");
+        }
+        $stmt->execute([':token' => $deviceToken, ':platform' => $devicePlatform, ':id' => $userId]);
+        $db->sendResponse([], 'Device token updated successfully');
+    } catch (PDOException $e) {
+        $db->sendError('Failed to update device token', 500);
+    }
+}
+
+// =============================================
+// 15. GET USER NOTIFICATIONS (Mobile App)
+// =============================================
+elseif ($method === 'GET' && $action === 'user-notifications') {
+    $userId = isset($_GET['user_id']) ? intval($_GET['user_id']) : 0;
+    $userType = isset($_GET['user_type']) ? $_GET['user_type'] : 'user';
+    $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
+    $limit = isset($_GET['limit']) ? min(50, max(1, intval($_GET['limit']))) : 20;
+    $offset = ($page - 1) * $limit;
+    
+    if (!$userId) {
+        $db->sendError('User ID required', 400);
+    }
+    
+    $unreadStmt = $conn->prepare("SELECT COUNT(*) FROM user_notifications WHERE user_id = :user_id AND user_type = :user_type AND is_read = 0");
+    $unreadStmt->execute([':user_id' => $userId, ':user_type' => $userType]);
+    $unreadCount = $unreadStmt->fetchColumn();
+    
+    $stmt = $conn->prepare("SELECT * FROM user_notifications WHERE user_id = :user_id AND user_type = :user_type ORDER BY created_at DESC LIMIT :limit OFFSET :offset");
+    $stmt->bindValue(':user_id', $userId);
+    $stmt->bindValue(':user_type', $userType);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+    $stmt->execute();
+    $notifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    $db->sendResponse(['notifications' => $notifications, 'unread_count' => intval($unreadCount), 'pagination' => ['current_page' => $page, 'per_page' => $limit, 'total' => count($notifications)]]);
+}
+
+// =============================================
+// 16. MARK NOTIFICATION AS READ (Mobile App)
+// =============================================
+elseif ($method === 'POST' && $action === 'mark-read') {
+    $data = json_decode(file_get_contents('php://input'), true);
+    $notificationId = $data['notification_id'] ?? 0;
+    $userId = $data['user_id'] ?? 0;
+    
+    if (!$notificationId || !$userId) {
+        $db->sendError('Notification ID and User ID required', 400);
+    }
+    
+    $stmt = $conn->prepare("UPDATE user_notifications SET is_read = 1, read_at = NOW() WHERE id = :id AND user_id = :user_id");
+    $stmt->execute([':id' => $notificationId, ':user_id' => $userId]);
+    $db->sendResponse([], 'Notification marked as read');
+}
+
+// =============================================
+// 17. MARK ALL NOTIFICATIONS AS READ (Mobile App)
+// =============================================
+elseif ($method === 'POST' && $action === 'mark-all-read') {
+    $data = json_decode(file_get_contents('php://input'), true);
+    $userId = $data['user_id'] ?? 0;
+    $userType = $data['user_type'] ?? 'user';
+    
+    if (!$userId) {
+        $db->sendError('User ID required', 400);
+    }
+    
+    $stmt = $conn->prepare("UPDATE user_notifications SET is_read = 1, read_at = NOW() WHERE user_id = :user_id AND user_type = :user_type AND is_read = 0");
+    $stmt->execute([':user_id' => $userId, ':user_type' => $userType]);
+    $db->sendResponse([], 'All notifications marked as read');
+}
+
+// =============================================
+// 18. GET UNREAD COUNT (Mobile App)
+// =============================================
+elseif ($method === 'GET' && $action === 'unread-count') {
+    $userId = isset($_GET['user_id']) ? intval($_GET['user_id']) : 0;
+    $userType = isset($_GET['user_type']) ? $_GET['user_type'] : 'user';
+    
+    if (!$userId) {
+        $db->sendError('User ID required', 400);
+    }
+    
+    $stmt = $conn->prepare("SELECT COUNT(*) FROM user_notifications WHERE user_id = :user_id AND user_type = :user_type AND is_read = 0");
+    $stmt->execute([':user_id' => $userId, ':user_type' => $userType]);
     $unreadCount = $stmt->fetchColumn();
     
-    ResponseHandler::success(['unread_count' => (int)$unreadCount]);
+    $db->sendResponse(['unread_count' => intval($unreadCount)]);
 }
 
-/*********************************
- * 15. GET NOTIFICATION TEMPLATES
- *********************************/
-elseif ($method === 'GET' && $action === 'templates') {
-    $stmt = $conn->query("SELECT * FROM notification_templates WHERE is_active = 1 ORDER BY name");
-    $templates = $stmt->fetchAll(PDO::FETCH_ASSOC);
+// =============================================
+// 19. CLEAR ALL NOTIFICATIONS
+// =============================================
+elseif ($method === 'DELETE' && $action === 'clear-all') {
+    checkPermission('delete_notifications', $auth, $db);
     
-    ResponseHandler::success(['templates' => $templates]);
+    $confirm = isset($_GET['confirm']) ? $_GET['confirm'] : '';
+    if ($confirm !== 'yes') {
+        $db->sendError('Please confirm with ?confirm=yes to clear all notifications', 400);
+    }
+    
+    $conn->prepare("DELETE FROM notification_delivery")->execute();
+    $stmt = $conn->prepare("DELETE FROM admin_notifications");
+    $stmt->execute();
+    
+    $db->sendResponse(['deleted_count' => $stmt->rowCount()], 'All notifications cleared successfully');
 }
 
-/*********************************
- * Default - Invalid action
- *********************************/
+// =============================================
+// 20. DEFAULT - INVALID ACTION
+// =============================================
 else {
-    ResponseHandler::error('Invalid action. Available: audience-count, create, list, delete, bulk-delete, user-notifications, mark-read, mark-all-read, update-device-token, stats, details, resend, export, unread-count, templates', 400);
+    $db->sendError('Invalid action. Available actions: list, details, create, update, delete, bulk-delete, stats, templates, audience-count, resend, export, test-push, test-email, update-device-token, user-notifications, mark-read, mark-all-read, unread-count, clear-all', 400);
 }
 ?>
