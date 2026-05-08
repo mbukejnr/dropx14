@@ -1,6 +1,6 @@
 <?php
-// backend/api/admin/notifications.php
-// PRODUCTION VERSION - Reads credentials from Environment Variables (Railway)
+// backend/api/admin/admin_notifications.php
+// COMPLETE NOTIFICATION SYSTEM - FULL PRODUCTION VERSION
 
 /*********************************
  * CORS Configuration
@@ -46,8 +46,8 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-require_once __DIR__ . '/../config/database.php';
-require_once __DIR__ . '/../includes/ResponseHandler.php';
+require_once __DIR__ . '/../../config/database.php';
+require_once __DIR__ . '/../../includes/ResponseHandler.php';
 
 // Check admin authentication
 if (empty($_SESSION['admin_id']) && empty($_SESSION['user_id'])) {
