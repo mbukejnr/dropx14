@@ -137,15 +137,40 @@ function sendPushNotification($deviceToken, $title, $message, $type = 'general',
     if (empty($deviceToken)) return false;
     
     $accessToken = getFCMAccessToken();
-    if (!$accessToken) return false;
+    if (!$accessToken) {
+        error_log("Failed to get FCM access token");
+        return false;
+    }
     
     $payload = [
         'message' => [
             'token' => $deviceToken,
-            'notification' => ['title' => $title, 'body' => $message, 'sound' => 'default'],
-            'data' => array_merge(['type' => $type, 'title' => $title, 'message' => $message, 'timestamp' => date('c')], $data),
-            'android' => ['priority' => 'high'],
-            'apns' => ['payload' => ['aps' => ['sound' => 'default']]]
+            'notification' => [
+                'title' => $title,
+                'body' => $message,
+                'sound' => 'default'
+            ],
+            'data' => array_merge([
+                'type' => $type,
+                'title' => $title,
+                'message' => $message,
+                'timestamp' => date('c')
+            ], $data),
+            'android' => [
+                'priority' => 'high',
+                'notification' => [
+                    'sound' => 'default',
+                    'priority' => 'high'
+                ]
+            ],
+            'apns' => [
+                'payload' => [
+                    'aps' => [
+                        'sound' => 'default',
+                        'badge' => 1
+                    ]
+                ]
+            ]
         ]
     ];
     
@@ -154,14 +179,23 @@ function sendPushNotification($deviceToken, $title, $message, $type = 'general',
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: Bearer ' . $accessToken, 'Content-Type: application/json']);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Authorization: Bearer ' . $accessToken,
+        'Content-Type: application/json'
+    ]);
     curl_setopt($ch, CURLOPT_TIMEOUT, 30);
     
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error = curl_error($ch);
     curl_close($ch);
     
-    return $httpCode === 200;
+    if ($httpCode !== 200) {
+        error_log("FCM push failed: HTTP $httpCode, Response: $response, Error: $error");
+        return false;
+    }
+    
+    return true;
 }
 
 function sendEmailNotification($email, $subject, $message) {
@@ -207,31 +241,33 @@ function sendEmailNotification($email, $subject, $message) {
 
 function createInAppNotification($conn, $userId, $userType, $title, $message, $type, $actionUrl = null, $orderId = null) {
     try {
-        $stmt = $conn->prepare("INSERT INTO user_notifications (user_id, user_type, title, message, type, action_url, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())");
+        $stmt = $conn->prepare("INSERT INTO user_notifications (user_id, user_type, title, message, type, action_url, order_id, created_at, is_read) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), 0)");
         return $stmt->execute([$userId, $userType, $title, $message, $type, $actionUrl, $orderId]);
     } catch (PDOException $e) {
+        error_log("In-app notification error: " . $e->getMessage());
         return false;
     }
 }
 
 // =============================================
-// SPECIFIC RECIPIENT FUNCTIONS
+// SPECIFIC RECIPIENT FUNCTIONS - FIXED
 // =============================================
 
-function getSpecificRecipients($conn, $recipientIds) {
+function getSpecificRecipients($conn, $recipientObjects) {
     $recipients = [];
     
-    if (empty($recipientIds)) {
+    if (empty($recipientObjects)) {
         return $recipients;
     }
     
-    foreach ($recipientIds as $recipient) {
-        $userId = $recipient['id'];
-        $userType = $recipient['type'];
+    foreach ($recipientObjects as $recipient) {
+        // Handle both array and object formats
+        $recipientId = is_array($recipient) ? $recipient['id'] : $recipient->id;
+        $userType = is_array($recipient) ? $recipient['type'] : $recipient->type;
         
         if ($userType === 'customer') {
             $stmt = $conn->prepare("SELECT id, email, device_token, full_name as name FROM users WHERE id = ? AND is_active = 1");
-            $stmt->execute([$userId]);
+            $stmt->execute([$recipientId]);
             $user = $stmt->fetch(PDO::FETCH_ASSOC);
             if ($user) {
                 $recipients[] = [
@@ -244,7 +280,7 @@ function getSpecificRecipients($conn, $recipientIds) {
             }
         } elseif ($userType === 'merchant') {
             $stmt = $conn->prepare("SELECT id, email, device_token, business_name as name FROM merchants WHERE id = ? AND is_active = 1");
-            $stmt->execute([$userId]);
+            $stmt->execute([$recipientId]);
             $user = $stmt->fetch(PDO::FETCH_ASSOC);
             if ($user) {
                 $recipients[] = [
@@ -442,12 +478,12 @@ function getAllMerchants($conn) {
 // =============================================
 
 function sendNotifications($conn, $notificationId, $recipients, $notificationData) {
-    $sendPush = $notificationData['send_push'];
-    $sendEmail = $notificationData['send_email'];
-    $sendInApp = $notificationData['send_in_app'];
+    $sendPush = $notificationData['send_push'] ?? true;
+    $sendEmail = $notificationData['send_email'] ?? false;
+    $sendInApp = $notificationData['send_in_app'] ?? true;
     $title = $notificationData['title'];
     $message = $notificationData['message'];
-    $type = $notificationData['type'];
+    $type = $notificationData['type'] ?? 'general';
     $actionUrl = $notificationData['action_url'] ?? null;
     
     $pushSent = 0;
@@ -455,20 +491,23 @@ function sendNotifications($conn, $notificationId, $recipients, $notificationDat
     $inAppSent = 0;
     
     foreach ($recipients as $recipient) {
+        // Send Email
         if ($sendEmail && !empty($recipient['email'])) {
             if (sendEmailNotification($recipient['email'], $title, $message)) {
                 $emailSent++;
             }
-            usleep(100000);
+            usleep(100000); // Rate limiting
         }
         
+        // Send Push Notification
         if ($sendPush && !empty($recipient['device_token'])) {
             if (sendPushNotification($recipient['device_token'], $title, $message, $type, ['notification_id' => $notificationId])) {
                 $pushSent++;
             }
-            usleep(50000);
+            usleep(50000); // Rate limiting
         }
         
+        // Send In-App Notification
         if ($sendInApp) {
             if (createInAppNotification($conn, $recipient['id'], $recipient['type'], $title, $message, $type, $actionUrl)) {
                 $inAppSent++;
@@ -513,7 +552,7 @@ if ($method === 'GET' && $action === 'filter-options') {
 }
 
 // =============================================
-// 2. GET AUDIENCE COUNT (BULK OR SPECIFIC)
+// 2. GET AUDIENCE COUNT (BULK OR SPECIFIC) - FIXED
 // =============================================
 elseif ($method === 'GET' && $action === 'audience-count') {
     checkPermission('view_notifications', $auth, $db);
@@ -521,10 +560,19 @@ elseif ($method === 'GET' && $action === 'audience-count') {
     $audience = isset($_GET['audience']) ? $_GET['audience'] : 'customers';
     $segment = isset($_GET['segment']) ? $_GET['segment'] : null;
     
-    // Check if specific recipients are provided
-    $specificIds = isset($_GET['specific_ids']) ? json_decode($_GET['specific_ids'], true) : null;
+    // FIXED: Parse specific_ids correctly from JSON string
+    $specificIdsRaw = isset($_GET['specific_ids']) ? $_GET['specific_ids'] : null;
+    $specificIds = null;
     
-    if ($audience === 'specific' && !empty($specificIds)) {
+    if ($specificIdsRaw) {
+        $specificIds = json_decode($specificIdsRaw, true);
+        // If it's a string that needs double decoding
+        if (is_string($specificIds)) {
+            $specificIds = json_decode($specificIds, true);
+        }
+    }
+    
+    if ($audience === 'specific' && !empty($specificIds) && is_array($specificIds)) {
         $recipients = getSpecificRecipients($conn, $specificIds);
         $total = count($recipients);
         $emails = 0;
@@ -605,7 +653,7 @@ elseif ($method === 'GET' && $action === 'audience-count') {
 }
 
 // =============================================
-// 3. CREATE AND SEND NOTIFICATION
+// 3. CREATE AND SEND NOTIFICATION - FIXED
 // =============================================
 elseif ($method === 'POST' && $action === 'create') {
     checkPermission('create_notifications', $auth, $db);
@@ -664,6 +712,11 @@ elseif ($method === 'POST' && $action === 'create') {
         $targetRecipients = getFilteredCustomers($conn, $filters);
     } elseif ($audience === 'merchants') {
         $targetRecipients = getAllMerchants($conn);
+    } elseif ($audience === 'all') {
+        // Combine customers and merchants
+        $customers = getFilteredCustomers($conn, []);
+        $merchants = getAllMerchants($conn);
+        $targetRecipients = array_merge($customers, $merchants);
     }
     
     $targetCount = count($targetRecipients);
@@ -815,7 +868,8 @@ elseif ($method === 'GET' && $action === 'list') {
         'scheduled' => $conn->query("SELECT COUNT(*) FROM admin_notifications WHERE status = 'scheduled'")->fetchColumn(),
         'total_emails' => $conn->query("SELECT SUM(email_sent_count) FROM admin_notifications")->fetchColumn(),
         'total_pushes' => $conn->query("SELECT SUM(push_sent_count) FROM admin_notifications")->fetchColumn(),
-        'total_in_app' => $conn->query("SELECT SUM(in_app_sent_count) FROM admin_notifications")->fetchColumn()
+        'total_in_app' => $conn->query("SELECT SUM(in_app_sent_count) FROM admin_notifications")->fetchColumn(),
+        'by_type' => $conn->query("SELECT type, COUNT(*) as count FROM admin_notifications GROUP BY type")->fetchAll(PDO::FETCH_ASSOC)
     ];
     
     $db->sendResponse([
@@ -1021,6 +1075,10 @@ elseif ($method === 'POST' && $action === 'resend') {
         $recipients = getFilteredCustomers($conn, $filters);
     } elseif ($notification['audience'] === 'merchants') {
         $recipients = getAllMerchants($conn);
+    } elseif ($notification['audience'] === 'all') {
+        $customers = getFilteredCustomers($conn, []);
+        $merchants = getAllMerchants($conn);
+        $recipients = array_merge($customers, $merchants);
     }
     
     $results = sendNotifications($conn, $id, $recipients, $notification);
