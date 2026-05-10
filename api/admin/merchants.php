@@ -1,11 +1,22 @@
 <?php
 // backend/api/admin/merchants.php
 // COMPLETE PRODUCTION-READY ADMIN MERCHANT API WITH IMAGE UPLOAD
-// INTEGRATED WITH YOUR EXISTING AUTH SYSTEM
+// UPDATED TO MATCH CUSTOMER APP DATA STRUCTURE
 
 // =============================================
 // CORS & AUTH LOADING
 // =============================================
+header("Access-Control-Allow-Origin: *");
+header("Access-Control-Allow-Credentials: true");
+header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-Session-Token, X-Device-ID, X-Platform, X-App-Version");
+header("Content-Type: application/json; charset=UTF-8");
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
+
 require_once __DIR__ . '/../../config/admin_database.php';
 require_once __DIR__ . '/../../includes/admin_auth.php';
 
@@ -164,7 +175,6 @@ if ($method === 'POST' && $action === 'upload-image') {
 
 // GET: List all merchants
 elseif ($method === 'GET' && $action === 'list') {
-    // Super admin and operations_admin can view all merchants
     if ($admin['role'] !== 'super_admin' && $admin['role'] !== 'operations_admin') {
         checkPermission('view_merchants', $auth, $db);
     }
@@ -197,18 +207,17 @@ elseif ($method === 'GET' && $action === 'list') {
     
     $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
     
-    // Get total count
     $countSql = "SELECT COUNT(*) as total FROM merchants m $whereClause";
     $countStmt = $conn->prepare($countSql);
     $countStmt->execute($params);
     $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
     
-    // Get merchants with stats
     $sql = "SELECT 
                 m.id, m.name, m.email, m.phone, m.description, m.category, m.business_type,
                 m.rating, m.review_count, m.is_open, m.is_active, m.is_featured,
                 m.image_url, m.logo_url, m.address, m.latitude, m.longitude,
                 m.min_order_amount, m.delivery_radius, m.delivery_time, m.preparation_time,
+                m.opening_hours, m.payment_methods,
                 m.created_at, m.updated_at,
                 (SELECT COUNT(*) FROM menu_items WHERE merchant_id = m.id) as total_menu_items,
                 (SELECT COUNT(*) FROM quick_orders WHERE merchant_id = m.id) as total_quick_orders,
@@ -228,7 +237,6 @@ elseif ($method === 'GET' && $action === 'list') {
     $stmt->execute();
     $merchants = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // Format logo URLs
     foreach ($merchants as &$merchant) {
         if (!empty($merchant['logo_url'])) {
             $merchant['logo_url'] = formatImageUrl($merchant['logo_url'], $baseUrl, 'merchant');
@@ -236,9 +244,14 @@ elseif ($method === 'GET' && $action === 'list') {
         if (!empty($merchant['image_url'])) {
             $merchant['image_url'] = formatImageUrl($merchant['image_url'], $baseUrl, 'merchant');
         }
+        if (!empty($merchant['opening_hours'])) {
+            $merchant['opening_hours'] = json_decode($merchant['opening_hours'], true);
+        }
+        if (!empty($merchant['payment_methods'])) {
+            $merchant['payment_methods'] = json_decode($merchant['payment_methods'], true);
+        }
     }
     
-    // Get categories for filter
     $catStmt = $conn->query("SELECT DISTINCT category FROM merchants WHERE category IS NOT NULL ORDER BY category");
     $categories = $catStmt->fetchAll(PDO::FETCH_COLUMN);
     
@@ -280,12 +293,17 @@ elseif ($method === 'GET' && $merchantId && $action === 'details') {
         $db->sendError('Merchant not found', 404);
     }
     
-    // Format image URLs
     if (!empty($merchant['logo_url'])) {
         $merchant['logo_url'] = formatImageUrl($merchant['logo_url'], $baseUrl, 'merchant');
     }
     if (!empty($merchant['image_url'])) {
         $merchant['image_url'] = formatImageUrl($merchant['image_url'], $baseUrl, 'merchant');
+    }
+    if (!empty($merchant['opening_hours'])) {
+        $merchant['opening_hours'] = json_decode($merchant['opening_hours'], true);
+    }
+    if (!empty($merchant['payment_methods'])) {
+        $merchant['payment_methods'] = json_decode($merchant['payment_methods'], true);
     }
     
     $db->sendResponse(['merchant' => $merchant]);
@@ -308,29 +326,33 @@ elseif ($method === 'POST' && $action === 'create') {
         $db->sendError('Invalid email format', 400);
     }
     
-    // Check if email exists
     $check = $conn->prepare("SELECT id FROM merchants WHERE email = :email");
     $check->execute([':email' => $data['email']]);
     if ($check->fetch()) {
         $db->sendError('Email already exists', 400);
     }
     
-    // Check if phone exists
     $check = $conn->prepare("SELECT id FROM merchants WHERE phone = :phone");
     $check->execute([':phone' => $data['phone']]);
     if ($check->fetch()) {
         $db->sendError('Phone number already exists', 400);
     }
     
+    // Convert opening_hours and payment_methods to JSON if provided
+    $openingHours = isset($data['opening_hours']) ? json_encode($data['opening_hours']) : null;
+    $paymentMethods = isset($data['payment_methods']) ? json_encode($data['payment_methods']) : null;
+    
     $stmt = $conn->prepare("
         INSERT INTO merchants (
             name, email, phone, description, category, business_type,
             address, latitude, longitude, min_order_amount, delivery_radius,
-            delivery_time, preparation_time, is_open, is_active, created_at, updated_at
+            delivery_time, preparation_time, opening_hours, payment_methods,
+            is_open, is_active, created_at, updated_at
         ) VALUES (
             :name, :email, :phone, :description, :category, :business_type,
             :address, :latitude, :longitude, :min_order_amount, :delivery_radius,
-            :delivery_time, :preparation_time, :is_open, 1, NOW(), NOW()
+            :delivery_time, :preparation_time, :opening_hours, :payment_methods,
+            :is_open, 1, NOW(), NOW()
         )
     ");
     
@@ -348,6 +370,8 @@ elseif ($method === 'POST' && $action === 'create') {
         ':delivery_radius' => $data['delivery_radius'] ?? 5,
         ':delivery_time' => $data['delivery_time'] ?? '30-45 min',
         ':preparation_time' => $data['preparation_time'] ?? '15-20 min',
+        ':opening_hours' => $openingHours,
+        ':payment_methods' => $paymentMethods,
         ':is_open' => $data['is_open'] ?? 1
     ]);
     
@@ -369,13 +393,17 @@ elseif ($method === 'PUT' && $merchantId && $action === 'update') {
         'name', 'email', 'phone', 'description', 'category', 'business_type',
         'address', 'latitude', 'longitude', 'min_order_amount', 'delivery_radius',
         'delivery_time', 'preparation_time', 'image_url', 'logo_url', 
-        'is_open', 'is_active', 'is_featured'
+        'is_open', 'is_active', 'is_featured', 'opening_hours', 'payment_methods'
     ];
     
     foreach ($allowedFields as $field) {
         if (isset($data[$field])) {
+            $value = $data[$field];
+            if (($field === 'opening_hours' || $field === 'payment_methods') && is_array($value)) {
+                $value = json_encode($value);
+            }
             $fields[] = "$field = :$field";
-            $params[":$field"] = $data[$field];
+            $params[":$field"] = $value;
         }
     }
     
@@ -395,18 +423,15 @@ elseif ($method === 'PUT' && $merchantId && $action === 'update') {
 elseif ($method === 'DELETE' && $merchantId && $action === 'delete') {
     checkPermission('delete_merchants', $auth, $db);
     
-    // Check if merchant has orders
     $check = $conn->prepare("SELECT COUNT(*) FROM orders WHERE merchant_id = :id");
     $check->execute([':id' => $merchantId]);
     $orderCount = $check->fetchColumn();
     
     if ($orderCount > 0) {
-        // Soft delete - just deactivate
         $stmt = $conn->prepare("UPDATE merchants SET is_active = 0, updated_at = NOW() WHERE id = :id");
         $stmt->execute([':id' => $merchantId]);
         $message = 'Merchant deactivated successfully (has existing orders)';
     } else {
-        // Hard delete
         $stmt = $conn->prepare("DELETE FROM merchants WHERE id = :id");
         $stmt->execute([':id' => $merchantId]);
         $message = 'Merchant deleted successfully';
@@ -415,7 +440,7 @@ elseif ($method === 'DELETE' && $merchantId && $action === 'delete') {
     $db->sendResponse([], $message);
 }
 
-// POST: Toggle merchant status (open/close)
+// POST: Toggle merchant status
 elseif ($method === 'POST' && $merchantId && $action === 'toggle-status') {
     checkPermission('edit_merchants', $auth, $db);
     
@@ -442,7 +467,8 @@ elseif ($method === 'GET' && $merchantId && $action === 'menu-items') {
     
     $stmt = $conn->prepare("
         SELECT mi.*,
-            CASE WHEN mi.has_variants = 1 THEN mi.variants_json ELSE NULL END as variants
+            CASE WHEN mi.has_variants = 1 THEN mi.variants_json ELSE NULL END as variants,
+            CASE WHEN mi.add_ons_json IS NOT NULL THEN mi.add_ons_json ELSE NULL END as add_ons
         FROM menu_items mi
         WHERE mi.merchant_id = :merchant_id
         ORDER BY mi.sort_order ASC, mi.name ASC
@@ -450,13 +476,15 @@ elseif ($method === 'GET' && $merchantId && $action === 'menu-items') {
     $stmt->execute([':merchant_id' => $merchantId]);
     $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // Format image URLs
     foreach ($items as &$item) {
         if (!empty($item['image_url'])) {
             $item['image_url'] = formatImageUrl($item['image_url'], $baseUrl, 'menu');
         }
         if ($item['has_variants'] && $item['variants']) {
             $item['variants'] = json_decode($item['variants'], true);
+        }
+        if ($item['add_ons']) {
+            $item['add_ons'] = json_decode($item['add_ons'], true);
         }
     }
     
@@ -482,6 +510,9 @@ elseif ($method === 'GET' && $action === 'menu-item' && isset($_GET['item_id']))
     if ($item['has_variants']) {
         $item['variants'] = json_decode($item['variants_json'], true);
     }
+    if (!empty($item['add_ons_json'])) {
+        $item['add_ons'] = json_decode($item['add_ons_json'], true);
+    }
     if (!empty($item['image_url'])) {
         $item['image_url'] = formatImageUrl($item['image_url'], $baseUrl, 'menu');
     }
@@ -502,20 +533,25 @@ elseif ($method === 'POST' && $action === 'create-menu-item') {
         }
     }
     
-    // Handle image URL - if it's a relative path from upload, keep as is
     $imageUrl = $data['image_url'] ?? '';
     if (!empty($imageUrl) && strpos($imageUrl, $baseUrl) === 0) {
-        // Extract relative path
         $imageUrl = str_replace($baseUrl . '/uploads/menu_items/', '', $imageUrl);
     }
+    
+    // Handle add_ons_json if provided
+    $addOnsJson = isset($data['add_ons']) ? json_encode($data['add_ons']) : null;
     
     $stmt = $conn->prepare("
         INSERT INTO menu_items (
             merchant_id, name, description, price, category, image_url,
-            is_available, is_popular, has_variants, variants_json, sort_order, created_at
+            is_available, is_popular, has_variants, variants_json, add_ons_json,
+            preparation_time, max_quantity, stock_quantity, unit_type, unit_value,
+            sort_order, created_at
         ) VALUES (
             :merchant_id, :name, :description, :price, :category, :image_url,
-            :is_available, :is_popular, :has_variants, :variants_json, :sort_order, NOW()
+            :is_available, :is_popular, :has_variants, :variants_json, :add_ons_json,
+            :preparation_time, :max_quantity, :stock_quantity, :unit_type, :unit_value,
+            :sort_order, NOW()
         )
     ");
     
@@ -530,6 +566,12 @@ elseif ($method === 'POST' && $action === 'create-menu-item') {
         ':is_popular' => $data['is_popular'] ?? 0,
         ':has_variants' => $data['has_variants'] ?? 0,
         ':variants_json' => json_encode($data['variants'] ?? []),
+        ':add_ons_json' => $addOnsJson,
+        ':preparation_time' => $data['preparation_time'] ?? 15,
+        ':max_quantity' => $data['max_quantity'] ?? 99,
+        ':stock_quantity' => $data['stock_quantity'] ?? null,
+        ':unit_type' => $data['unit_type'] ?? 'piece',
+        ':unit_value' => $data['unit_value'] ?? 1,
         ':sort_order' => $data['sort_order'] ?? 0
     ]);
     
@@ -546,8 +588,12 @@ elseif ($method === 'PUT' && $action === 'update-menu-item' && isset($_GET['item
     $fields = [];
     $params = [':id' => $itemId];
     
-    $allowedFields = ['name', 'description', 'price', 'category', 
-                      'is_available', 'is_popular', 'has_variants', 'sort_order'];
+    $allowedFields = [
+        'name', 'description', 'price', 'category', 
+        'is_available', 'is_popular', 'has_variants', 
+        'preparation_time', 'max_quantity', 'stock_quantity',
+        'unit_type', 'unit_value', 'sort_order'
+    ];
     
     foreach ($allowedFields as $field) {
         if (isset($data[$field])) {
@@ -556,7 +602,6 @@ elseif ($method === 'PUT' && $action === 'update-menu-item' && isset($_GET['item
         }
     }
     
-    // Handle image URL
     if (isset($data['image_url'])) {
         $imageUrl = $data['image_url'];
         if (!empty($imageUrl) && strpos($imageUrl, $baseUrl) === 0) {
@@ -569,6 +614,11 @@ elseif ($method === 'PUT' && $action === 'update-menu-item' && isset($_GET['item
     if (isset($data['variants'])) {
         $fields[] = "variants_json = :variants_json";
         $params[':variants_json'] = json_encode($data['variants']);
+    }
+    
+    if (isset($data['add_ons'])) {
+        $fields[] = "add_ons_json = :add_ons_json";
+        $params[':add_ons_json'] = json_encode($data['add_ons']);
     }
     
     if (empty($fields)) {
@@ -594,7 +644,7 @@ elseif ($method === 'DELETE' && $action === 'delete-menu-item' && isset($_GET['i
 }
 
 // =============================================
-// 3. QUICK ORDERS MANAGEMENT
+// 3. QUICK ORDERS MANAGEMENT (UPDATED FOR CUSTOMER APP)
 // =============================================
 
 // GET: All quick orders for a merchant
@@ -602,7 +652,16 @@ elseif ($method === 'GET' && $merchantId && $action === 'quick-orders') {
     checkPermission('view_quick_orders', $auth, $db);
     
     $stmt = $conn->prepare("
-        SELECT qo.*,
+        SELECT 
+            qo.id, qo.title, qo.description, qo.category, qo.subcategory,
+            qo.item_type, qo.image_url, qo.color, qo.info, qo.is_popular,
+            qo.delivery_time, qo.price, qo.order_count, qo.rating, qo.average_rating,
+            qo.min_order_amount, qo.available_all_day, qo.available_start_time, qo.available_end_time,
+            qo.seasonal_available, qo.season_start_month, qo.season_end_month,
+            qo.has_variants, qo.variant_type, qo.preparation_time,
+            qo.merchant_id, qo.merchant_name, qo.merchant_address, qo.merchant_distance,
+            qo.pickup_time, qo.tags, qo.nutritional_info, qo.is_available,
+            qo.created_at, qo.updated_at,
             (SELECT COUNT(*) FROM quick_order_items WHERE quick_order_id = qo.id) as total_items
         FROM quick_orders qo
         WHERE qo.merchant_id = :merchant_id
@@ -611,10 +670,15 @@ elseif ($method === 'GET' && $merchantId && $action === 'quick-orders') {
     $stmt->execute([':merchant_id' => $merchantId]);
     $quickOrders = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // Format image URLs
     foreach ($quickOrders as &$qo) {
         if (!empty($qo['image_url'])) {
             $qo['image_url'] = formatImageUrl($qo['image_url'], $baseUrl, 'quick');
+        }
+        if (!empty($qo['tags'])) {
+            $qo['tags'] = json_decode($qo['tags'], true);
+        }
+        if (!empty($qo['nutritional_info'])) {
+            $qo['nutritional_info'] = json_decode($qo['nutritional_info'], true);
         }
     }
     
@@ -629,7 +693,13 @@ elseif ($method === 'GET' && $action === 'quick-order' && isset($_GET['quick_ord
     checkPermission('view_quick_orders', $auth, $db);
     
     $quickOrderId = intval($_GET['quick_order_id']);
-    $stmt = $conn->prepare("SELECT * FROM quick_orders WHERE id = :id");
+    $stmt = $conn->prepare("
+        SELECT 
+            qo.*,
+            (SELECT COUNT(*) FROM quick_order_items WHERE quick_order_id = qo.id) as total_items
+        FROM quick_orders qo 
+        WHERE qo.id = :id
+    ");
     $stmt->execute([':id' => $quickOrderId]);
     $quickOrder = $stmt->fetch(PDO::FETCH_ASSOC);
     
@@ -640,11 +710,37 @@ elseif ($method === 'GET' && $action === 'quick-order' && isset($_GET['quick_ord
     if (!empty($quickOrder['image_url'])) {
         $quickOrder['image_url'] = formatImageUrl($quickOrder['image_url'], $baseUrl, 'quick');
     }
+    if (!empty($quickOrder['tags'])) {
+        $quickOrder['tags'] = json_decode($quickOrder['tags'], true);
+    }
+    if (!empty($quickOrder['nutritional_info'])) {
+        $quickOrder['nutritional_info'] = json_decode($quickOrder['nutritional_info'], true);
+    }
+    
+    // Get items for this quick order
+    $itemsStmt = $conn->prepare("
+        SELECT * FROM quick_order_items 
+        WHERE quick_order_id = :quick_order_id
+        ORDER BY is_default DESC, price ASC
+    ");
+    $itemsStmt->execute([':quick_order_id' => $quickOrderId]);
+    $items = $itemsStmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    foreach ($items as &$item) {
+        if (!empty($item['image_url'])) {
+            $item['image_url'] = formatImageUrl($item['image_url'], $baseUrl, 'menu_items');
+        }
+        if ($item['has_variants'] && !empty($item['variants_json'])) {
+            $item['variants'] = json_decode($item['variants_json'], true);
+        }
+    }
+    
+    $quickOrder['items'] = $items;
     
     $db->sendResponse(['quick_order' => $quickOrder]);
 }
 
-// POST: Create quick order
+// POST: Create quick order (UPDATED with all customer app fields)
 elseif ($method === 'POST' && $action === 'create-quick-order') {
     checkPermission('edit_quick_orders', $auth, $db);
     
@@ -657,19 +753,34 @@ elseif ($method === 'POST' && $action === 'create-quick-order') {
         }
     }
     
-    // Handle image URL
     $imageUrl = $data['image_url'] ?? '';
     if (!empty($imageUrl) && strpos($imageUrl, $baseUrl) === 0) {
         $imageUrl = str_replace($baseUrl . '/uploads/quick_orders/', '', $imageUrl);
     }
     
+    // Handle JSON fields
+    $tags = isset($data['tags']) ? json_encode($data['tags']) : null;
+    $nutritionalInfo = isset($data['nutritional_info']) ? json_encode($data['nutritional_info']) : null;
+    
     $stmt = $conn->prepare("
         INSERT INTO quick_orders (
-            merchant_id, title, description, category, item_type, price,
-            image_url, is_popular, is_available, preparation_time, created_at
+            merchant_id, title, description, category, subcategory, item_type,
+            image_url, color, info, is_popular, delivery_time, price,
+            order_count, rating, average_rating, min_order_amount,
+            available_all_day, available_start_time, available_end_time,
+            seasonal_available, season_start_month, season_end_month,
+            has_variants, variant_type, preparation_time,
+            merchant_name, merchant_address, merchant_distance,
+            pickup_time, tags, nutritional_info, is_available, created_at
         ) VALUES (
-            :merchant_id, :title, :description, :category, :item_type, :price,
-            :image_url, :is_popular, 1, :preparation_time, NOW()
+            :merchant_id, :title, :description, :category, :subcategory, :item_type,
+            :image_url, :color, :info, :is_popular, :delivery_time, :price,
+            0, 0, 0, :min_order_amount,
+            :available_all_day, :available_start_time, :available_end_time,
+            :seasonal_available, :season_start_month, :season_end_month,
+            :has_variants, :variant_type, :preparation_time,
+            :merchant_name, :merchant_address, :merchant_distance,
+            :pickup_time, :tags, :nutritional_info, 1, NOW()
         )
     ");
     
@@ -678,17 +789,82 @@ elseif ($method === 'POST' && $action === 'create-quick-order') {
         ':title' => $data['title'],
         ':description' => $data['description'] ?? '',
         ':category' => $data['category'] ?? '',
+        ':subcategory' => $data['subcategory'] ?? '',
         ':item_type' => $data['item_type'] ?? 'food',
-        ':price' => $data['price'],
         ':image_url' => $imageUrl,
+        ':color' => $data['color'] ?? '#3A86FF',
+        ':info' => $data['info'] ?? '',
         ':is_popular' => $data['is_popular'] ?? 0,
-        ':preparation_time' => $data['preparation_time'] ?? '15-20 min'
+        ':delivery_time' => $data['delivery_time'] ?? '30-45 min',
+        ':price' => $data['price'],
+        ':min_order_amount' => $data['min_order_amount'] ?? 0,
+        ':available_all_day' => $data['available_all_day'] ?? 1,
+        ':available_start_time' => $data['available_start_time'] ?? '00:00:00',
+        ':available_end_time' => $data['available_end_time'] ?? '23:59:59',
+        ':seasonal_available' => $data['seasonal_available'] ?? 0,
+        ':season_start_month' => $data['season_start_month'] ?? null,
+        ':season_end_month' => $data['season_end_month'] ?? null,
+        ':has_variants' => $data['has_variants'] ?? 0,
+        ':variant_type' => $data['variant_type'] ?? null,
+        ':preparation_time' => $data['preparation_time'] ?? '15-20 min',
+        ':merchant_name' => $data['merchant_name'] ?? '',
+        ':merchant_address' => $data['merchant_address'] ?? '',
+        ':merchant_distance' => $data['merchant_distance'] ?? null,
+        ':pickup_time' => $data['pickup_time'] ?? null,
+        ':tags' => $tags,
+        ':nutritional_info' => $nutritionalInfo
     ]);
     
-    $db->sendResponse(['id' => $conn->lastInsertId()], 'Quick order created', 201);
+    $quickOrderId = $conn->lastInsertId();
+    
+    // Create quick order items if provided
+    if (isset($data['items']) && is_array($data['items'])) {
+        $itemStmt = $conn->prepare("
+            INSERT INTO quick_order_items (
+                quick_order_id, name, description, price, image_url,
+                measurement_type, unit, quantity, custom_unit, is_default,
+                is_available, stock_quantity, has_variants, variants_json,
+                badge, price_per_unit, max_quantity, created_at
+            ) VALUES (
+                :quick_order_id, :name, :description, :price, :image_url,
+                :measurement_type, :unit, :quantity, :custom_unit, :is_default,
+                :is_available, :stock_quantity, :has_variants, :variants_json,
+                :badge, :price_per_unit, :max_quantity, NOW()
+            )
+        ");
+        
+        foreach ($data['items'] as $item) {
+            $itemImageUrl = $item['image_url'] ?? '';
+            if (!empty($itemImageUrl) && strpos($itemImageUrl, $baseUrl) === 0) {
+                $itemImageUrl = str_replace($baseUrl . '/uploads/menu_items/', '', $itemImageUrl);
+            }
+            
+            $itemStmt->execute([
+                ':quick_order_id' => $quickOrderId,
+                ':name' => $item['name'],
+                ':description' => $item['description'] ?? '',
+                ':price' => $item['price'],
+                ':image_url' => $itemImageUrl,
+                ':measurement_type' => $item['measurement_type'] ?? 'custom',
+                ':unit' => $item['unit'] ?? 'piece',
+                ':quantity' => $item['quantity'] ?? null,
+                ':custom_unit' => $item['custom_unit'] ?? null,
+                ':is_default' => $item['is_default'] ?? 0,
+                ':is_available' => $item['is_available'] ?? 1,
+                ':stock_quantity' => $item['stock_quantity'] ?? null,
+                ':has_variants' => $item['has_variants'] ?? 0,
+                ':variants_json' => json_encode($item['variants'] ?? []),
+                ':badge' => $item['badge'] ?? null,
+                ':price_per_unit' => $item['price_per_unit'] ?? null,
+                ':max_quantity' => $item['max_quantity'] ?? 99
+            ]);
+        }
+    }
+    
+    $db->sendResponse(['id' => $quickOrderId], 'Quick order created', 201);
 }
 
-// PUT: Update quick order
+// PUT: Update quick order (UPDATED with all customer app fields)
 elseif ($method === 'PUT' && $action === 'update-quick-order' && isset($_GET['quick_order_id'])) {
     checkPermission('edit_quick_orders', $auth, $db);
     
@@ -698,8 +874,15 @@ elseif ($method === 'PUT' && $action === 'update-quick-order' && isset($_GET['qu
     $fields = [];
     $params = [':id' => $quickOrderId];
     
-    $allowedFields = ['title', 'description', 'category', 'item_type', 'price', 
-                      'is_popular', 'is_available', 'preparation_time'];
+    $allowedFields = [
+        'title', 'description', 'category', 'subcategory', 'item_type',
+        'color', 'info', 'is_popular', 'delivery_time', 'price',
+        'min_order_amount', 'available_all_day', 'available_start_time',
+        'available_end_time', 'seasonal_available', 'season_start_month',
+        'season_end_month', 'has_variants', 'variant_type', 'preparation_time',
+        'merchant_name', 'merchant_address', 'merchant_distance', 'pickup_time',
+        'is_available', 'order_count', 'rating', 'average_rating'
+    ];
     
     foreach ($allowedFields as $field) {
         if (isset($data[$field])) {
@@ -708,7 +891,6 @@ elseif ($method === 'PUT' && $action === 'update-quick-order' && isset($_GET['qu
         }
     }
     
-    // Handle image URL
     if (isset($data['image_url'])) {
         $imageUrl = $data['image_url'];
         if (!empty($imageUrl) && strpos($imageUrl, $baseUrl) === 0) {
@@ -718,11 +900,23 @@ elseif ($method === 'PUT' && $action === 'update-quick-order' && isset($_GET['qu
         $params[':image_url'] = $imageUrl;
     }
     
+    if (isset($data['tags'])) {
+        $fields[] = "tags = :tags";
+        $params[':tags'] = json_encode($data['tags']);
+    }
+    
+    if (isset($data['nutritional_info'])) {
+        $fields[] = "nutritional_info = :nutritional_info";
+        $params[':nutritional_info'] = json_encode($data['nutritional_info']);
+    }
+    
     if (empty($fields)) {
         $db->sendError('No fields to update', 400);
     }
     
-    $stmt = $conn->prepare("UPDATE quick_orders SET " . implode(', ', $fields) . " WHERE id = :id");
+    $fields[] = "updated_at = NOW()";
+    $sql = "UPDATE quick_orders SET " . implode(', ', $fields) . " WHERE id = :id";
+    $stmt = $conn->prepare($sql);
     $stmt->execute($params);
     
     $db->sendResponse([], 'Quick order updated');
@@ -733,13 +927,163 @@ elseif ($method === 'DELETE' && $action === 'delete-quick-order' && isset($_GET[
     checkPermission('edit_quick_orders', $auth, $db);
     
     $quickOrderId = intval($_GET['quick_order_id']);
+    
+    // Delete associated items first
+    $itemStmt = $conn->prepare("DELETE FROM quick_order_items WHERE quick_order_id = :id");
+    $itemStmt->execute([':id' => $quickOrderId]);
+    
     $stmt = $conn->prepare("DELETE FROM quick_orders WHERE id = :id");
     $stmt->execute([':id' => $quickOrderId]);
+    
     $db->sendResponse([], 'Quick order deleted');
 }
 
 // =============================================
-// 4. ADS MANAGEMENT
+// 4. QUICK ORDER ITEMS MANAGEMENT (NEW)
+// =============================================
+
+// GET: Items for a quick order
+elseif ($method === 'GET' && $action === 'quick-order-items' && isset($_GET['quick_order_id'])) {
+    checkPermission('view_quick_orders', $auth, $db);
+    
+    $quickOrderId = intval($_GET['quick_order_id']);
+    $stmt = $conn->prepare("
+        SELECT * FROM quick_order_items 
+        WHERE quick_order_id = :quick_order_id
+        ORDER BY is_default DESC, price ASC
+    ");
+    $stmt->execute([':quick_order_id' => $quickOrderId]);
+    $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    foreach ($items as &$item) {
+        if (!empty($item['image_url'])) {
+            $item['image_url'] = formatImageUrl($item['image_url'], $baseUrl, 'menu_items');
+        }
+        if ($item['has_variants'] && !empty($item['variants_json'])) {
+            $item['variants'] = json_decode($item['variants_json'], true);
+        }
+    }
+    
+    $db->sendResponse(['items' => $items]);
+}
+
+// POST: Create quick order item
+elseif ($method === 'POST' && $action === 'create-quick-order-item') {
+    checkPermission('edit_quick_orders', $auth, $db);
+    
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    $required = ['quick_order_id', 'name', 'price'];
+    foreach ($required as $field) {
+        if (empty($data[$field])) {
+            $db->sendError("Field '{$field}' is required", 400);
+        }
+    }
+    
+    $imageUrl = $data['image_url'] ?? '';
+    if (!empty($imageUrl) && strpos($imageUrl, $baseUrl) === 0) {
+        $imageUrl = str_replace($baseUrl . '/uploads/menu_items/', '', $imageUrl);
+    }
+    
+    $stmt = $conn->prepare("
+        INSERT INTO quick_order_items (
+            quick_order_id, name, description, price, image_url,
+            measurement_type, unit, quantity, custom_unit, is_default,
+            is_available, stock_quantity, has_variants, variants_json,
+            badge, price_per_unit, max_quantity, created_at
+        ) VALUES (
+            :quick_order_id, :name, :description, :price, :image_url,
+            :measurement_type, :unit, :quantity, :custom_unit, :is_default,
+            :is_available, :stock_quantity, :has_variants, :variants_json,
+            :badge, :price_per_unit, :max_quantity, NOW()
+        )
+    ");
+    
+    $stmt->execute([
+        ':quick_order_id' => $data['quick_order_id'],
+        ':name' => $data['name'],
+        ':description' => $data['description'] ?? '',
+        ':price' => $data['price'],
+        ':image_url' => $imageUrl,
+        ':measurement_type' => $data['measurement_type'] ?? 'custom',
+        ':unit' => $data['unit'] ?? 'piece',
+        ':quantity' => $data['quantity'] ?? null,
+        ':custom_unit' => $data['custom_unit'] ?? null,
+        ':is_default' => $data['is_default'] ?? 0,
+        ':is_available' => $data['is_available'] ?? 1,
+        ':stock_quantity' => $data['stock_quantity'] ?? null,
+        ':has_variants' => $data['has_variants'] ?? 0,
+        ':variants_json' => json_encode($data['variants'] ?? []),
+        ':badge' => $data['badge'] ?? null,
+        ':price_per_unit' => $data['price_per_unit'] ?? null,
+        ':max_quantity' => $data['max_quantity'] ?? 99
+    ]);
+    
+    $db->sendResponse(['id' => $conn->lastInsertId()], 'Quick order item created', 201);
+}
+
+// PUT: Update quick order item
+elseif ($method === 'PUT' && $action === 'update-quick-order-item' && isset($_GET['item_id'])) {
+    checkPermission('edit_quick_orders', $auth, $db);
+    
+    $itemId = intval($_GET['item_id']);
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    $fields = [];
+    $params = [':id' => $itemId];
+    
+    $allowedFields = [
+        'name', 'description', 'price', 'measurement_type', 'unit',
+        'quantity', 'custom_unit', 'is_default', 'is_available',
+        'stock_quantity', 'has_variants', 'badge', 'price_per_unit', 'max_quantity'
+    ];
+    
+    foreach ($allowedFields as $field) {
+        if (isset($data[$field])) {
+            $fields[] = "$field = :$field";
+            $params[":$field"] = $data[$field];
+        }
+    }
+    
+    if (isset($data['image_url'])) {
+        $imageUrl = $data['image_url'];
+        if (!empty($imageUrl) && strpos($imageUrl, $baseUrl) === 0) {
+            $imageUrl = str_replace($baseUrl . '/uploads/menu_items/', '', $imageUrl);
+        }
+        $fields[] = "image_url = :image_url";
+        $params[':image_url'] = $imageUrl;
+    }
+    
+    if (isset($data['variants'])) {
+        $fields[] = "variants_json = :variants_json";
+        $params[':variants_json'] = json_encode($data['variants']);
+    }
+    
+    if (empty($fields)) {
+        $db->sendError('No fields to update', 400);
+    }
+    
+    $fields[] = "updated_at = NOW()";
+    $sql = "UPDATE quick_order_items SET " . implode(', ', $fields) . " WHERE id = :id";
+    $stmt = $conn->prepare($sql);
+    $stmt->execute($params);
+    
+    $db->sendResponse([], 'Quick order item updated');
+}
+
+// DELETE: Delete quick order item
+elseif ($method === 'DELETE' && $action === 'delete-quick-order-item' && isset($_GET['item_id'])) {
+    checkPermission('edit_quick_orders', $auth, $db);
+    
+    $itemId = intval($_GET['item_id']);
+    $stmt = $conn->prepare("DELETE FROM quick_order_items WHERE id = :id");
+    $stmt->execute([':id' => $itemId]);
+    
+    $db->sendResponse([], 'Quick order item deleted');
+}
+
+// =============================================
+// 5. ADS MANAGEMENT
 // =============================================
 
 // GET: Ads for specific merchant
@@ -749,7 +1093,7 @@ elseif ($method === 'GET' && $merchantId && $action === 'merchant-ads') {
     $stmt = $conn->prepare("
         SELECT * FROM ad_photos 
         WHERE merchant_id = :merchant_id 
-        ORDER BY sort_order ASC
+        ORDER BY is_primary DESC, sort_order ASC
     ");
     $stmt->execute([':merchant_id' => $merchantId]);
     $ads = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -774,7 +1118,6 @@ elseif ($method === 'POST' && $action === 'create-ad') {
         $db->sendError('Photo path is required', 400);
     }
     
-    // Handle image URL
     $photoPath = $data['photo_path'];
     if (!empty($photoPath) && strpos($photoPath, $baseUrl) === 0) {
         $photoPath = str_replace($baseUrl . '/uploads/ads/', '', $photoPath);
@@ -806,7 +1149,7 @@ elseif ($method === 'DELETE' && $action === 'delete-ad' && isset($_GET['ad_id'])
 }
 
 // =============================================
-// 5. CATEGORIES MANAGEMENT
+// 6. CATEGORIES MANAGEMENT
 // =============================================
 
 // GET: All merchant categories
@@ -823,8 +1166,22 @@ elseif ($method === 'GET' && $action === 'categories') {
     $db->sendResponse(['categories' => $categories]);
 }
 
+// GET: All quick order categories
+elseif ($method === 'GET' && $action === 'quick-categories') {
+    $stmt = $conn->query("
+        SELECT DISTINCT category, COUNT(*) as item_count 
+        FROM quick_orders 
+        WHERE category IS NOT NULL AND category != ''
+        GROUP BY category 
+        ORDER BY category
+    ");
+    $categories = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    $db->sendResponse(['quick_categories' => $categories]);
+}
+
 // =============================================
-// 6. MERCHANT REVIEWS
+// 7. MERCHANT REVIEWS
 // =============================================
 
 // GET: Reviews for a merchant
@@ -835,12 +1192,10 @@ elseif ($method === 'GET' && $merchantId && $action === 'reviews') {
     $limit = isset($_GET['limit']) ? min(50, max(1, intval($_GET['limit']))) : 20;
     $offset = ($page - 1) * $limit;
     
-    // Get total
     $countStmt = $conn->prepare("SELECT COUNT(*) as total FROM merchant_reviews WHERE merchant_id = :merchant_id");
     $countStmt->execute([':merchant_id' => $merchantId]);
     $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
     
-    // Get reviews
     $stmt = $conn->prepare("
         SELECT mr.*, u.full_name as user_name, u.avatar as user_avatar
         FROM merchant_reviews mr
@@ -867,7 +1222,7 @@ elseif ($method === 'GET' && $merchantId && $action === 'reviews') {
 }
 
 // =============================================
-// 7. MERCHANT ORDERS
+// 8. MERCHANT ORDERS
 // =============================================
 
 // GET: Orders for a merchant
@@ -887,15 +1242,16 @@ elseif ($method === 'GET' && $merchantId && $action === 'orders') {
         $params[':status'] = $status;
     }
     
-    // Get total
     $countSql = "SELECT COUNT(*) FROM orders o WHERE $where";
     $countStmt = $conn->prepare($countSql);
     $countStmt->execute($params);
     $total = $countStmt->fetchColumn();
     
-    // Get orders
     $sql = "SELECT 
                 o.id, o.order_number, o.status, o.total_amount, o.payment_method,
+                o.subtotal, o.tip_amount, o.discount_amount,
+                o.delivery_address, o.special_instructions,
+                o.preparation_time, o.estimated_delivery_time,
                 o.created_at, u.full_name as customer_name, u.phone as customer_phone
             FROM orders o
             LEFT JOIN users u ON o.user_id = u.id
@@ -924,7 +1280,7 @@ elseif ($method === 'GET' && $merchantId && $action === 'orders') {
 }
 
 // =============================================
-// 8. DASHBOARD STATS
+// 9. DASHBOARD STATS
 // =============================================
 
 // GET: Dashboard statistics
@@ -952,6 +1308,9 @@ elseif ($method === 'GET' && $action === 'stats') {
     
     $stmt = $conn->query("SELECT COUNT(*) FROM quick_orders");
     $stats['total_quick_orders'] = intval($stmt->fetchColumn());
+    
+    $stmt = $conn->query("SELECT COUNT(*) FROM quick_order_items");
+    $stats['total_quick_order_items'] = intval($stmt->fetchColumn());
     
     $stmt = $conn->query("SELECT COUNT(*) FROM ad_photos");
     $stats['total_ads'] = intval($stmt->fetchColumn());
@@ -988,7 +1347,7 @@ elseif ($method === 'GET' && $action === 'stats') {
 }
 
 // =============================================
-// 9. BULK OPERATIONS
+// 10. BULK OPERATIONS
 // =============================================
 
 // POST: Bulk update merchant status
@@ -1064,10 +1423,40 @@ elseif ($method === 'POST' && $action === 'bulk-delete') {
     }
 }
 
+// POST: Bulk update quick order availability
+elseif ($method === 'POST' && $action === 'bulk-quick-status') {
+    checkPermission('edit_quick_orders', $auth, $db);
+    
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    if (empty($data['quick_order_ids']) || !is_array($data['quick_order_ids'])) {
+        $db->sendError('quick_order_ids array is required', 400);
+    }
+    
+    if (!isset($data['is_available'])) {
+        $db->sendError('is_available field is required', 400);
+    }
+    
+    $ids = array_map('intval', $data['quick_order_ids']);
+    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+    $isAvailable = intval($data['is_available']);
+    
+    $stmt = $conn->prepare("UPDATE quick_orders SET is_available = ?, updated_at = NOW() WHERE id IN ($placeholders)");
+    $params = array_merge([$isAvailable], $ids);
+    $stmt->execute($params);
+    
+    $affected = $stmt->rowCount();
+    
+    $db->sendResponse([
+        'updated_count' => $affected,
+        'status' => $isAvailable ? 'available' : 'unavailable'
+    ], "$affected quick order(s) updated");
+}
+
 // =============================================
 // Invalid action handler
 // =============================================
 else {
-    $db->sendError('Invalid action. Available actions: list, details, create, update, delete, toggle-status, menu-items, menu-item, create-menu-item, update-menu-item, delete-menu-item, quick-orders, quick-order, create-quick-order, update-quick-order, delete-quick-order, ads, merchant-ads, create-ad, delete-ad, categories, reviews, orders, stats, bulk-status, bulk-delete, upload-image', 400);
+    $db->sendError('Invalid action. Available actions: list, details, create, update, delete, toggle-status, menu-items, menu-item, create-menu-item, update-menu-item, delete-menu-item, quick-orders, quick-order, quick-order-items, create-quick-order, update-quick-order, delete-quick-order, create-quick-order-item, update-quick-order-item, delete-quick-order-item, ads, merchant-ads, create-ad, delete-ad, categories, quick-categories, reviews, orders, stats, bulk-status, bulk-delete, bulk-quick-status, upload-image', 400);
 }
 ?>
