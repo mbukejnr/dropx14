@@ -243,6 +243,9 @@ function handlePostRequest() {
         case 'delete_address':
             deleteAddress($conn, $input);
             break;
+        case 'register_device':  // ✅ ADDED DEVICE REGISTRATION
+            registerDevice($conn, $input);
+            break;
         default:
             ResponseHandler::error('Invalid action: ' . $action, 400);
     }
@@ -779,9 +782,8 @@ function logoutUser() {
 }
 
 /*********************************
- * SIMPLIFIED ADDRESS FUNCTIONS (Google Maps Only)
+ * ADDRESS FUNCTIONS (Google Maps)
  *********************************/
-
 function getAddresses($conn, $data) {
     if (empty($_SESSION['user_id'])) {
         ResponseHandler::error('Unauthorized', 401);
@@ -918,6 +920,90 @@ function deleteAddress($conn, $data) {
     ]);
     
     ResponseHandler::success([], 'Address deleted successfully');
+}
+
+/*********************************
+ * 🔥 DEVICE REGISTRATION FOR FCM PUSH NOTIFICATIONS
+ *********************************/
+function registerDevice($conn, $data) {
+    // Check if user is logged in
+    if (empty($_SESSION['user_id'])) {
+        ResponseHandler::error('Unauthorized - Please login first', 401);
+    }
+
+    $fcmToken = $data['fcm_token'] ?? '';
+    $deviceOs = $data['device_os'] ?? '';
+    $deviceName = $data['device_name'] ?? '';
+    $appVersion = $data['app_version'] ?? '';
+
+    // Validate FCM token
+    if (!$fcmToken) {
+        ResponseHandler::error('FCM token is required', 400);
+    }
+
+    // Create table if not exists (with proper foreign key)
+    try {
+        $conn->exec("
+            CREATE TABLE IF NOT EXISTS user_devices (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                fcm_token TEXT NOT NULL,
+                device_os VARCHAR(50),
+                device_name VARCHAR(100),
+                app_version VARCHAR(20),
+                is_active TINYINT DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_user_id (user_id),
+                INDEX idx_is_active (is_active),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        ");
+    } catch (PDOException $e) {
+        error_log("Failed to create user_devices table: " . $e->getMessage());
+        // Continue anyway - table might already exist
+    }
+
+    // Check if token already exists
+    $stmt = $conn->prepare("SELECT id FROM user_devices WHERE fcm_token = :token LIMIT 1");
+    $stmt->execute([':token' => $fcmToken]);
+    $exists = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($exists) {
+        // Update existing device
+        $stmt = $conn->prepare("
+            UPDATE user_devices SET 
+                user_id = :user_id,
+                device_os = :device_os,
+                device_name = :device_name,
+                app_version = :app_version,
+                is_active = 1,
+                updated_at = NOW()
+            WHERE fcm_token = :token
+        ");
+    } else {
+        // Insert new device
+        $stmt = $conn->prepare("
+            INSERT INTO user_devices (user_id, fcm_token, device_os, device_name, app_version)
+            VALUES (:user_id, :token, :device_os, :device_name, :app_version)
+        ");
+    }
+
+    $stmt->execute([
+        ':user_id' => $_SESSION['user_id'],
+        ':token' => $fcmToken,
+        ':device_os' => $deviceOs,
+        ':device_name' => $deviceName,
+        ':app_version' => $appVersion
+    ]);
+
+    // Log success
+    error_log("Device registered for user_id: {$_SESSION['user_id']}, OS: $deviceOs");
+
+    ResponseHandler::success([
+        'registered' => true,
+        'message' => 'Device registered for push notifications'
+    ], 'Device registered successfully');
 }
 
 /*********************************
