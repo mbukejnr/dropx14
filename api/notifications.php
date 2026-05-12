@@ -333,13 +333,15 @@ function getNotificationPreferences($conn, $userId) {
 }
 
 /*********************************
- * GET USER DEVICES
+ * GET USER DEVICES (from unified user_devices table)
  *********************************/
 function getUserDevices($conn, $userId) {
     $stmt = $conn->prepare(
-        "SELECT id, device_type, device_name, device_model, app_version, 
-                os_version, is_active, last_active, created_at
-         FROM user_devices WHERE user_id = :user_id AND is_active = 1"
+        "SELECT id, device_os, device_name, app_version, is_active, 
+                last_used as last_active, created_at, updated_at
+         FROM user_devices 
+         WHERE user_id = :user_id AND is_active = 1
+         ORDER BY last_used DESC"
     );
     $stmt->execute([':user_id' => $userId]);
     $devices = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -362,15 +364,13 @@ function getUnreadCount($conn, $userId) {
 }
 
 /*********************************
- * REGISTER DEVICE TOKEN
+ * REGISTER DEVICE TOKEN (using unified table structure)
  *********************************/
 function registerDeviceToken($conn, $userId, $input) {
     $fcmToken = $input['fcm_token'] ?? '';
-    $deviceType = $input['device_type'] ?? 'android';
+    $deviceOs = $input['device_os'] ?? $input['device_type'] ?? 'android';
     $deviceName = $input['device_name'] ?? $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown';
-    $deviceModel = $input['device_model'] ?? '';
     $appVersion = $input['app_version'] ?? '';
-    $osVersion = $input['os_version'] ?? '';
     
     if (empty($fcmToken)) {
         ResponseHandler::error('FCM token is required', 400);
@@ -378,50 +378,43 @@ function registerDeviceToken($conn, $userId, $input) {
     
     // Check if token exists
     $checkStmt = $conn->prepare(
-        "SELECT id FROM user_devices WHERE user_id = :user_id AND fcm_token = :fcm_token"
+        "SELECT id, user_id FROM user_devices WHERE fcm_token = :fcm_token"
     );
-    $checkStmt->execute([
-        ':user_id' => $userId,
-        ':fcm_token' => $fcmToken
-    ]);
+    $checkStmt->execute([':fcm_token' => $fcmToken]);
+    $existing = $checkStmt->fetch(PDO::FETCH_ASSOC);
     
-    if ($checkStmt->fetch()) {
-        // Update existing
+    if ($existing) {
+        // Update existing - if belongs to different user, update user_id
         $stmt = $conn->prepare(
             "UPDATE user_devices 
-             SET is_active = 1, device_type = :device_type,
-                 device_name = :device_name, device_model = :device_model,
-                 app_version = :app_version, os_version = :os_version,
-                 last_active = NOW(), updated_at = NOW()
-             WHERE user_id = :user_id AND fcm_token = :fcm_token"
+             SET user_id = :user_id, device_os = :device_os,
+                 device_name = :device_name, app_version = :app_version,
+                 is_active = 1, last_used = NOW(), updated_at = NOW()
+             WHERE fcm_token = :fcm_token"
         );
     } else {
-        // Insert new
+        // Insert new device
         $stmt = $conn->prepare(
             "INSERT INTO user_devices 
-             (user_id, fcm_token, device_type, device_name, device_model, 
-              app_version, os_version, is_active, created_at, last_active)
+             (user_id, fcm_token, device_os, device_name, app_version, is_active, created_at, last_used)
              VALUES 
-             (:user_id, :fcm_token, :device_type, :device_name, :device_model,
-              :app_version, :os_version, 1, NOW(), NOW())"
+             (:user_id, :fcm_token, :device_os, :device_name, :app_version, 1, NOW(), NOW())"
         );
     }
     
     $stmt->execute([
         ':user_id' => $userId,
         ':fcm_token' => $fcmToken,
-        ':device_type' => $deviceType,
+        ':device_os' => $deviceOs,
         ':device_name' => $deviceName,
-        ':device_model' => $deviceModel,
-        ':app_version' => $appVersion,
-        ':os_version' => $osVersion
+        ':app_version' => $appVersion
     ]);
     
     ResponseHandler::success(['message' => 'Device registered successfully']);
 }
 
 /*********************************
- * UNREGISTER DEVICE TOKEN
+ * UNREGISTER DEVICE TOKEN (soft delete)
  *********************************/
 function unregisterDeviceToken($conn, $userId, $input) {
     $fcmToken = $input['fcm_token'] ?? '';
@@ -708,11 +701,11 @@ function autoCreateNotification($conn, $userId, $type, $title, $message, $data =
 }
 
 /*********************************
- * SEND PUSH TO SPECIFIC USER (receiving push)
+ * SEND PUSH TO SPECIFIC USER (using unified table)
  *********************************/
 function sendPushToUser($conn, $userId, $title, $message, $type, $data = [], $notificationId = null) {
     try {
-        // Get user's active tokens
+        // Get user's active tokens from unified user_devices table
         $tokenStmt = $conn->prepare(
             "SELECT fcm_token FROM user_devices 
              WHERE user_id = :user_id AND is_active = 1
@@ -722,12 +715,14 @@ function sendPushToUser($conn, $userId, $title, $message, $type, $data = [], $no
         $tokens = $tokenStmt->fetchAll(PDO::FETCH_COLUMN);
         
         if (empty($tokens)) {
+            error_log("No active FCM tokens for user: $userId");
             return false;
         }
         
         // Get access token
         $accessToken = getFirebaseAccessToken();
         if (!$accessToken) {
+            error_log("Failed to get Firebase access token");
             return false;
         }
         
@@ -785,10 +780,31 @@ function sendPushToUser($conn, $userId, $title, $message, $type, $data = [], $no
             
             $response = curl_exec($ch);
             $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            
+            if (curl_errno($ch)) {
+                error_log("FCM cURL error: " . curl_error($ch));
+            }
+            
             curl_close($ch);
             
             if ($httpCode === 200) {
                 $successCount++;
+                error_log("FCM push sent successfully to token: " . substr($token, 0, 20) . "...");
+            } else {
+                error_log("FCM push failed. HTTP Code: $httpCode, Response: $response");
+                
+                // If token is invalid, deactivate it
+                if ($httpCode === 404 || $httpCode === 400) {
+                    $deactivateStmt = $conn->prepare(
+                        "UPDATE user_devices SET is_active = 0, updated_at = NOW()
+                         WHERE fcm_token = :token AND user_id = :user_id"
+                    );
+                    $deactivateStmt->execute([
+                        ':token' => $token,
+                        ':user_id' => $userId
+                    ]);
+                    error_log("Deactivated invalid token for user: $userId");
+                }
             }
         }
         
@@ -805,6 +821,7 @@ function sendPushToUser($conn, $userId, $title, $message, $type, $data = [], $no
         return $successCount > 0;
         
     } catch (Exception $e) {
+        error_log("sendPushToUser error: " . $e->getMessage());
         return false;
     }
 }
@@ -816,11 +833,13 @@ function getFirebaseServiceAccount() {
     $jsonStr = getenv('FIREBASE_SERVICE_ACCOUNT_JSON');
     
     if (!$jsonStr) {
+        error_log("FIREBASE_SERVICE_ACCOUNT_JSON environment variable not set");
         return null;
     }
     
     $serviceAccount = json_decode($jsonStr, true);
     if (!$serviceAccount || !isset($serviceAccount['project_id'])) {
+        error_log("Invalid Firebase service account JSON");
         return null;
     }
     
@@ -836,47 +855,54 @@ function getFirebaseAccessToken() {
         return null;
     }
     
-    // Create JWT header and payload
-    $header = base64_encode(json_encode(['alg' => 'RS256', 'typ' => 'JWT']));
-    
-    $claims = [
-        'iss' => $serviceAccount['client_email'],
-        'scope' => 'https://www.googleapis.com/auth/firebase.messaging',
-        'aud' => 'https://oauth2.googleapis.com/token',
-        'exp' => time() + 3600,
-        'iat' => time()
-    ];
-    $payload = base64_encode(json_encode($claims));
-    
-    // Sign the JWT
-    $privateKey = $serviceAccount['private_key'];
-    $signature = '';
-    openssl_sign($header . '.' . $payload, $signature, $privateKey, OPENSSL_ALGO_SHA256);
-    $signature = base64_encode($signature);
-    
-    $jwt = $header . '.' . $payload . '.' . $signature;
-    
-    // Exchange JWT for access token
-    $ch = curl_init('https://oauth2.googleapis.com/token');
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query([
-        'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-        'assertion' => $jwt
-    ]));
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-    
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    
-    if ($httpCode === 200) {
-        $data = json_decode($response, true);
-        return $data['access_token'] ?? null;
+    try {
+        // Create JWT header and payload
+        $header = base64_encode(json_encode(['alg' => 'RS256', 'typ' => 'JWT']));
+        
+        $claims = [
+            'iss' => $serviceAccount['client_email'],
+            'scope' => 'https://www.googleapis.com/auth/firebase.messaging',
+            'aud' => 'https://oauth2.googleapis.com/token',
+            'exp' => time() + 3600,
+            'iat' => time()
+        ];
+        $payload = base64_encode(json_encode($claims));
+        
+        // Sign the JWT
+        $privateKey = $serviceAccount['private_key'];
+        $signature = '';
+        openssl_sign($header . '.' . $payload, $signature, $privateKey, OPENSSL_ALGO_SHA256);
+        $signature = base64_encode($signature);
+        
+        $jwt = $header . '.' . $payload . '.' . $signature;
+        
+        // Exchange JWT for access token
+        $ch = curl_init('https://oauth2.googleapis.com/token');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query([
+            'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+            'assertion' => $jwt
+        ]));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200) {
+            $data = json_decode($response, true);
+            return $data['access_token'] ?? null;
+        }
+        
+        error_log("Failed to get Firebase access token. HTTP Code: $httpCode");
+        return null;
+        
+    } catch (Exception $e) {
+        error_log("getFirebaseAccessToken error: " . $e->getMessage());
+        return null;
     }
-    
-    return null;
 }
 
 /*********************************
