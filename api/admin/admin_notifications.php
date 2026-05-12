@@ -244,7 +244,6 @@ function sendEmailNotification($email, $subject, $message) {
 // =============================================
 function createInAppNotification($conn, $userId, $userType, $title, $message, $type, $actionUrl = null, $orderId = null) {
     try {
-        // Map notification type to your enum values
         $typeMap = [
             'order' => 'order',
             'order_update' => 'order',
@@ -260,14 +259,12 @@ function createInAppNotification($conn, $userId, $userType, $title, $message, $t
         
         $notificationType = $typeMap[$type] ?? 'system';
         
-        // Prepare data JSON
         $dataJson = json_encode([
             'action_url' => $actionUrl,
             'order_id' => $orderId,
             'user_type' => $userType
         ]);
         
-        // Insert into your notifications table
         $stmt = $conn->prepare("
             INSERT INTO notifications (user_id, type, title, message, data, sent_via, sent_at, created_at) 
             VALUES (?, ?, ?, ?, ?, 'admin_panel', NOW(), NOW())
@@ -282,7 +279,7 @@ function createInAppNotification($conn, $userId, $userType, $title, $message, $t
 }
 
 // =============================================
-// FIXED: GET RECIPIENTS FROM user_devices TABLE
+// GET RECIPIENTS FROM user_devices TABLE
 // =============================================
 
 function getSpecificRecipients($conn, $recipientObjects) {
@@ -319,7 +316,6 @@ function getSpecificRecipients($conn, $recipientObjects) {
         }
         
         if ($userType === 'customer') {
-            // Get user data with ALL their device tokens from user_devices
             $stmt = $conn->prepare("
                 SELECT 
                     u.id, 
@@ -335,7 +331,6 @@ function getSpecificRecipients($conn, $recipientObjects) {
             $stmt->execute([$recipientId]);
             $devices = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
-            // Create a recipient entry for each device token
             foreach ($devices as $device) {
                 if (!empty($device['device_token'])) {
                     $recipients[] = [
@@ -402,7 +397,6 @@ function getFilteredCustomers($conn, $filters) {
     
     $whereClause = empty($conditions) ? "WHERE 1=1" : "WHERE " . implode(" AND ", $conditions);
     
-    // Get all users with their device tokens from user_devices
     $sql = "
         SELECT 
             u.id, 
@@ -533,7 +527,6 @@ function sendNotifications($conn, $notificationId, $recipients, $notificationDat
     $uniqueUsers = [];
     
     foreach ($recipients as $recipient) {
-        // Send Email (once per user, not per device)
         if ($sendEmail && !empty($recipient['email']) && !in_array($recipient['id'], $uniqueUsers)) {
             if (sendEmailNotification($recipient['email'], $title, $message)) {
                 $emailSent++;
@@ -542,7 +535,6 @@ function sendNotifications($conn, $notificationId, $recipients, $notificationDat
             usleep(100000);
         }
         
-        // Send Push Notification (to each device)
         if ($sendPush && !empty($recipient['device_token'])) {
             if (sendPushNotification($recipient['device_token'], $title, $message, $type, [
                 'notification_id' => $notificationId,
@@ -553,7 +545,6 @@ function sendNotifications($conn, $notificationId, $recipients, $notificationDat
             usleep(50000);
         }
         
-        // Send In-App Notification (once per user)
         if ($sendInApp && !in_array($recipient['id'] . '_inapp', $uniqueUsers)) {
             if (createInAppNotification($conn, $recipient['id'], $recipient['type'], $title, $message, $type, $actionUrl)) {
                 $inAppSent++;
@@ -661,7 +652,6 @@ elseif ($method === 'POST' && $action === 'create') {
         $db->sendError('No recipients with device tokens match the selected criteria', 400);
     }
     
-    // Save to admin_notifications
     $stmt = $conn->prepare("
         INSERT INTO admin_notifications (
             title, message, type, audience, segment, target_count, 
@@ -687,10 +677,8 @@ elseif ($method === 'POST' && $action === 'create') {
     
     $notificationId = $conn->lastInsertId();
     
-    // Send notifications
     $results = sendNotifications($conn, $notificationId, $targetRecipients, $data);
     
-    // Update counts
     $updateStmt = $conn->prepare("
         UPDATE admin_notifications 
         SET sent_count = :sent_count, 
@@ -759,7 +747,7 @@ elseif ($method === 'GET' && $action === 'stats') {
     ]);
 }
 
-// 6. GET USER NOTIFICATIONS (for debugging)
+// 6. GET USER NOTIFICATIONS
 elseif ($method === 'GET' && $action === 'user-notifications') {
     checkPermission('view_notifications', $auth, $db);
     
