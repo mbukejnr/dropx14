@@ -203,7 +203,7 @@ function handlePostRequest() {
             registerUser($conn, $input);
             break;
         case 'logout':
-            logoutUser();
+            logoutUser($conn, $input);
             break;
         case 'send_email_verification':
         case 'resend_email_verification':
@@ -310,7 +310,7 @@ function loginUser($conn, $data) {
 
     // Register device if FCM token provided
     if ($fcmToken && !empty($fcmToken)) {
-        registerDeviceInternal($conn, $user['id'], $fcmToken, $deviceOs, $deviceName);
+        registerDeviceInternal($conn, $user['id'], $fcmToken, $deviceOs, $deviceName, '1.0.0');
     }
 
     unset($user['password']);
@@ -398,7 +398,7 @@ function registerUser($conn, $data) {
     
     // Register device if FCM token provided
     if ($fcmToken && !empty($fcmToken)) {
-        registerDeviceInternal($conn, $userId, $fcmToken, $deviceOs, $deviceName);
+        registerDeviceInternal($conn, $userId, $fcmToken, $deviceOs, $deviceName, '1.0.0');
     }
     
     $stmt = $conn->prepare(
@@ -804,10 +804,9 @@ function forgotPassword($conn, $data) {
     ResponseHandler::success([], 'Reset instructions sent to your email');
 }
 
-function logoutUser() {
+function logoutUser($conn, $data) {
     // Get FCM token if provided to unregister
-    $input = json_decode(file_get_contents('php://input'), true);
-    $fcmToken = $input['fcm_token'] ?? null;
+    $fcmToken = $data['fcm_token'] ?? null;
     
     if ($fcmToken && !empty($_SESSION['user_id'])) {
         // Soft delete - deactivate the device
@@ -992,13 +991,15 @@ function ensureDeviceTable($conn) {
 
 /**
  * Internal function to register device without session check
+ * FIXED: Added $appVersion parameter
  */
-function registerDeviceInternal($conn, $userId, $fcmToken, $deviceOs, $deviceName) {
+function registerDeviceInternal($conn, $userId, $fcmToken, $deviceOs, $deviceName, $appVersion = '1.0.0') {
     error_log("=== registerDeviceInternal START ===");
     error_log("User ID: $userId");
     error_log("FCM Token: " . substr($fcmToken, 0, 50) . "...");
     error_log("Device OS: $deviceOs");
     error_log("Device Name: $deviceName");
+    error_log("App Version: $appVersion");
     
     // Ensure table exists
     ensureDeviceTable($conn);
@@ -1016,6 +1017,7 @@ function registerDeviceInternal($conn, $userId, $fcmToken, $deviceOs, $deviceNam
                 user_id = :user_id,
                 device_os = :device_os,
                 device_name = :device_name,
+                app_version = :app_version,
                 is_active = 1,
                 last_used = NOW(),
                 updated_at = NOW()
@@ -1036,7 +1038,7 @@ function registerDeviceInternal($conn, $userId, $fcmToken, $deviceOs, $deviceNam
         ':token' => $fcmToken,
         ':device_os' => $deviceOs,
         ':device_name' => $deviceName ?: $deviceOs,
-        ':app_version' => $data['app_version'] ?? '1.0.0'
+        ':app_version' => $appVersion
     ];
     
     $result = $stmt->execute($params);
@@ -1054,6 +1056,7 @@ function registerDeviceInternal($conn, $userId, $fcmToken, $deviceOs, $deviceNam
 
 /**
  * Register device for current user
+ * FIXED: Pass app_version to internal function
  */
 function registerDevice($conn, $data) {
     error_log("=== registerDevice CALLED ===");
@@ -1079,7 +1082,8 @@ function registerDevice($conn, $data) {
     
     error_log("Processing device registration - Token length: " . strlen($fcmToken));
 
-    registerDeviceInternal($conn, $_SESSION['user_id'], $fcmToken, $deviceOs, $deviceName);
+    // Pass app_version to internal function
+    registerDeviceInternal($conn, $_SESSION['user_id'], $fcmToken, $deviceOs, $deviceName, $appVersion);
     
     error_log("Device registration completed for user_id: {$_SESSION['user_id']}");
     
