@@ -246,6 +246,9 @@ function handlePostRequest() {
         case 'register_device':
             registerDevice($conn, $input);
             break;
+        case 'unregister_device':
+            unregisterDevice($conn, $input);
+            break;
         case 'get_user_devices':
             getUserDevices($conn, $input);
             break;
@@ -306,7 +309,7 @@ function loginUser($conn, $data) {
          ->execute([':id' => $user['id']]);
 
     // Register device if FCM token provided
-    if ($fcmToken) {
+    if ($fcmToken && !empty($fcmToken)) {
         registerDeviceInternal($conn, $user['id'], $fcmToken, $deviceOs, $deviceName);
     }
 
@@ -394,7 +397,7 @@ function registerUser($conn, $data) {
     $userId = $conn->lastInsertId();
     
     // Register device if FCM token provided
-    if ($fcmToken) {
+    if ($fcmToken && !empty($fcmToken)) {
         registerDeviceInternal($conn, $userId, $fcmToken, $deviceOs, $deviceName);
     }
     
@@ -802,6 +805,24 @@ function forgotPassword($conn, $data) {
 }
 
 function logoutUser() {
+    // Get FCM token if provided to unregister
+    $input = json_decode(file_get_contents('php://input'), true);
+    $fcmToken = $input['fcm_token'] ?? null;
+    
+    if ($fcmToken && !empty($_SESSION['user_id'])) {
+        // Soft delete - deactivate the device
+        $db = new Database();
+        $conn = $db->getConnection();
+        $stmt = $conn->prepare(
+            "UPDATE user_devices SET is_active = 0, updated_at = NOW() 
+             WHERE fcm_token = :token AND user_id = :user_id"
+        );
+        $stmt->execute([
+            ':token' => $fcmToken,
+            ':user_id' => $_SESSION['user_id']
+        ]);
+    }
+    
     session_destroy();
     ResponseHandler::success([], 'Logout successful');
 }
@@ -946,38 +967,50 @@ function deleteAddress($conn, $data) {
  *********************************/
 
 /**
+ * Create user_devices table if it doesn't exist
+ */
+function ensureDeviceTable($conn) {
+    $conn->exec("
+        CREATE TABLE IF NOT EXISTS user_devices (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            fcm_token TEXT NOT NULL,
+            device_os VARCHAR(50),
+            device_name VARCHAR(100),
+            app_version VARCHAR(20),
+            is_active TINYINT DEFAULT 1,
+            last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_user_id (user_id),
+            INDEX idx_fcm_token (fcm_token(255)),
+            INDEX idx_is_active (is_active),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    ");
+}
+
+/**
  * Internal function to register device without session check
  */
 function registerDeviceInternal($conn, $userId, $fcmToken, $deviceOs, $deviceName) {
-    // Create table if not exists
-    try {
-        $conn->exec("
-            CREATE TABLE IF NOT EXISTS user_devices (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                user_id INT NOT NULL,
-                fcm_token TEXT NOT NULL,
-                device_os VARCHAR(50),
-                device_name VARCHAR(100),
-                app_version VARCHAR(20),
-                is_active TINYINT DEFAULT 1,
-                last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                INDEX idx_user_id (user_id),
-                INDEX idx_is_active (is_active),
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        ");
-    } catch (PDOException $e) {
-        error_log("Failed to create user_devices table: " . $e->getMessage());
-    }
-
+    error_log("=== registerDeviceInternal START ===");
+    error_log("User ID: $userId");
+    error_log("FCM Token: " . substr($fcmToken, 0, 50) . "...");
+    error_log("Device OS: $deviceOs");
+    error_log("Device Name: $deviceName");
+    
+    // Ensure table exists
+    ensureDeviceTable($conn);
+    
     // Check if token already exists
     $stmt = $conn->prepare("SELECT id FROM user_devices WHERE fcm_token = :token LIMIT 1");
     $stmt->execute([':token' => $fcmToken]);
     $exists = $stmt->fetch(PDO::FETCH_ASSOC);
+    error_log("Token exists: " . ($exists ? "YES (ID: {$exists['id']})" : "NO"));
 
     if ($exists) {
+        // Update existing device
         $stmt = $conn->prepare("
             UPDATE user_devices SET 
                 user_id = :user_id,
@@ -988,38 +1021,73 @@ function registerDeviceInternal($conn, $userId, $fcmToken, $deviceOs, $deviceNam
                 updated_at = NOW()
             WHERE fcm_token = :token
         ");
+        error_log("Updating existing device record");
     } else {
+        // Insert new device
         $stmt = $conn->prepare("
-            INSERT INTO user_devices (user_id, fcm_token, device_os, device_name)
-            VALUES (:user_id, :token, :device_os, :device_name)
+            INSERT INTO user_devices (user_id, fcm_token, device_os, device_name, app_version)
+            VALUES (:user_id, :token, :device_os, :device_name, :app_version)
         ");
+        error_log("Inserting new device record");
     }
 
-    $stmt->execute([
+    $params = [
         ':user_id' => $userId,
         ':token' => $fcmToken,
         ':device_os' => $deviceOs,
-        ':device_name' => $deviceName ?: $deviceOs
-    ]);
+        ':device_name' => $deviceName ?: $deviceOs,
+        ':app_version' => $data['app_version'] ?? '1.0.0'
+    ];
+    
+    $result = $stmt->execute($params);
+    
+    if ($result) {
+        error_log("Device registration SUCCESS");
+        error_log("Affected rows: " . $stmt->rowCount());
+    } else {
+        error_log("Device registration FAILED");
+        error_log("PDO Error: " . json_encode($stmt->errorInfo()));
+    }
+    
+    error_log("=== registerDeviceInternal END ===");
 }
 
+/**
+ * Register device for current user
+ */
 function registerDevice($conn, $data) {
-    if (empty($_SESSION['user_id'])) {
-        ResponseHandler::error('Unauthorized - Please login first', 401);
+    error_log("=== registerDevice CALLED ===");
+    error_log("Session user_id: " . ($_SESSION['user_id'] ?? 'NOT SET'));
+    error_log("Session logged_in: " . ($_SESSION['logged_in'] ?? 'NOT SET'));
+    
+    if (empty($_SESSION['user_id']) || empty($_SESSION['logged_in'])) {
+        error_log("ERROR: User not authenticated");
+        ResponseHandler::error('User not authenticated. Please login first.', 401);
+        return;
     }
 
     $fcmToken = $data['fcm_token'] ?? '';
     $deviceOs = $data['device_os'] ?? '';
     $deviceName = $data['device_name'] ?? '';
-    $appVersion = $data['app_version'] ?? '';
+    $appVersion = $data['app_version'] ?? '1.0.0';
 
     if (!$fcmToken) {
+        error_log("ERROR: No FCM token provided");
         ResponseHandler::error('FCM token is required', 400);
+        return;
     }
+    
+    error_log("Processing device registration - Token length: " . strlen($fcmToken));
 
     registerDeviceInternal($conn, $_SESSION['user_id'], $fcmToken, $deviceOs, $deviceName);
     
-    error_log("Device registered for user_id: {$_SESSION['user_id']}, OS: $deviceOs");
+    error_log("Device registration completed for user_id: {$_SESSION['user_id']}");
+    
+    // Verify it was saved
+    $checkStmt = $conn->prepare("SELECT COUNT(*) as count FROM user_devices WHERE fcm_token = :token");
+    $checkStmt->execute([':token' => $fcmToken]);
+    $count = $checkStmt->fetch(PDO::FETCH_ASSOC);
+    error_log("Verification - Token found in DB: " . ($count['count'] > 0 ? "YES" : "NO"));
 
     ResponseHandler::success([
         'registered' => true,
@@ -1027,9 +1095,51 @@ function registerDevice($conn, $data) {
     ], 'Device registered successfully');
 }
 
+/**
+ * Unregister device (soft delete - deactivate)
+ */
+function unregisterDevice($conn, $data) {
+    error_log("=== unregisterDevice CALLED ===");
+    
+    if (empty($_SESSION['user_id'])) {
+        error_log("ERROR: User not authenticated");
+        ResponseHandler::error('User not authenticated. Please login first.', 401);
+        return;
+    }
+    
+    $fcmToken = $data['fcm_token'] ?? '';
+    
+    if (!$fcmToken) {
+        error_log("ERROR: No FCM token provided");
+        ResponseHandler::error('FCM token is required', 400);
+        return;
+    }
+    
+    // Soft delete - deactivate the device
+    $stmt = $conn->prepare(
+        "UPDATE user_devices SET is_active = 0, updated_at = NOW() 
+         WHERE fcm_token = :token AND user_id = :user_id"
+    );
+    $stmt->execute([
+        ':token' => $fcmToken,
+        ':user_id' => $_SESSION['user_id']
+    ]);
+    
+    error_log("Device unregistered for user_id: {$_SESSION['user_id']}");
+    
+    ResponseHandler::success([
+        'unregistered' => true,
+        'message' => 'Device unregistered successfully'
+    ], 'Device unregistered successfully');
+}
+
+/**
+ * Get all devices for current user
+ */
 function getUserDevices($conn, $data) {
     if (empty($_SESSION['user_id'])) {
         ResponseHandler::error('Unauthorized', 401);
+        return;
     }
     
     $stmt = $conn->prepare(
@@ -1047,15 +1157,20 @@ function getUserDevices($conn, $data) {
     ]);
 }
 
+/**
+ * Delete device (hard delete - remove completely)
+ */
 function deleteUserDevice($conn, $data) {
     if (empty($_SESSION['user_id'])) {
         ResponseHandler::error('Unauthorized', 401);
+        return;
     }
     
     $deviceId = $data['device_id'] ?? 0;
     
     if (!$deviceId) {
         ResponseHandler::error('Device ID is required', 400);
+        return;
     }
     
     // Hard delete - remove device completely
@@ -1074,15 +1189,20 @@ function deleteUserDevice($conn, $data) {
     }
 }
 
+/**
+ * Logout from specific device (soft delete - deactivate)
+ */
 function logoutDevice($conn, $data) {
     if (empty($_SESSION['user_id'])) {
         ResponseHandler::error('Unauthorized', 401);
+        return;
     }
     
     $deviceId = $data['device_id'] ?? 0;
     
     if (!$deviceId) {
         ResponseHandler::error('Device ID is required', 400);
+        return;
     }
     
     // Soft delete - deactivate device but keep record
@@ -1167,8 +1287,8 @@ function formatUserData($conn, $user) {
         'updated_at' => $user['updated_at'] ?? '',
         'email_verified' => (bool) ($user['email_verified'] ?? false),
         'phone_verified' => (bool) ($user['phone_verified'] ?? false),
-        'devices' => $devices,  // ✅ Devices included
-        'device_count' => count($devices)  // ✅ Device count
+        'devices' => $devices,
+        'device_count' => count($devices)
     ];
 }
 ?>
