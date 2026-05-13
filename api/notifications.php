@@ -8,8 +8,10 @@
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Credentials: true");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-FCM-Token");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-FCM-Token, X-Session-Token, X-User-ID");
+header("Access-Control-Max-Age: 3600");
 header("Content-Type: application/json; charset=UTF-8");
+header("Cache-Control: no-store, no-cache, must-revalidate");
 
 // Handle preflight requests
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -17,7 +19,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-// Session configuration
+// Error handling
+ini_set('display_errors', 0);
+error_reporting(E_ALL & ~E_WARNING & ~E_NOTICE);
+
+set_error_handler(function($errno, $errstr, $errfile, $errline) {
+    if (strpos($errstr, 'Undefined array key') !== false) {
+        return true;
+    }
+    throw new ErrorException($errstr, 0, $errno, $errfile, $errline);
+});
+
+// Session configuration - Must be before any output
 if (session_status() === PHP_SESSION_NONE) {
     session_set_cookie_params([
         'lifetime' => 86400 * 30,
@@ -37,6 +50,52 @@ define('FCM_API_URL_V1', 'https://fcm.googleapis.com/v1/projects/');
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../includes/ResponseHandler.php';
 
+/*********************************
+ * AUTHENTICATION - MATCHES CART API
+ * Supports both native sessions and X-Session-Token header
+ *********************************/
+function checkAuthentication() {
+    // Method 1: Check for X-Session-Token header (mobile app)
+    $sessionToken = $_SERVER['HTTP_X_SESSION_TOKEN'] ?? null;
+    
+    if ($sessionToken) {
+        // Store current session ID if any
+        $currentSessionId = session_id();
+        
+        // Set the session ID from token
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close(); // Close current session
+        }
+        
+        session_id($sessionToken);
+        session_start();
+        
+        if (!empty($_SESSION['user_id']) && !empty($_SESSION['logged_in'])) {
+            return $_SESSION['user_id'];
+        }
+        
+        // If token invalid, restore original session
+        if ($currentSessionId && $currentSessionId !== session_id()) {
+            session_write_close();
+            session_id($currentSessionId);
+            session_start();
+        }
+    }
+    
+    // Method 2: Check native session
+    if (!empty($_SESSION['user_id']) && !empty($_SESSION['logged_in'])) {
+        return $_SESSION['user_id'];
+    }
+    
+    // Method 3: Fallback to X-User-ID header (for development/testing)
+    $userId = $_SERVER['HTTP_X_USER_ID'] ?? null;
+    if ($userId && is_numeric($userId)) {
+        return $userId;
+    }
+    
+    return null;
+}
+
 try {
     $db = new Database();
     $conn = $db->getConnection();
@@ -46,11 +105,11 @@ try {
     }
     
     // Check authentication for all customer endpoints
-    if (empty($_SESSION['user_id']) || empty($_SESSION['logged_in'])) {
+    $userId = checkAuthentication();
+    
+    if (!$userId) {
         ResponseHandler::error('Authentication required', 401);
     }
-    
-    $userId = $_SESSION['user_id'];
     
     // Route the request
     $method = $_SERVER['REQUEST_METHOD'];
@@ -78,6 +137,7 @@ try {
     }
     
 } catch (Exception $e) {
+    error_log("Notifications API Error: " . $e->getMessage());
     ResponseHandler::error('Server error: ' . $e->getMessage(), 500);
 }
 
