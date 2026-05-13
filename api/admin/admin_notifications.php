@@ -68,7 +68,124 @@ $mailersendFromEmail = getenv('MAILERSEND_FROM_EMAIL') ?: ($_ENV['MAILERSEND_FRO
 $mailersendFromName = getenv('MAILERSEND_FROM_NAME') ?: ($_ENV['MAILERSEND_FROM_NAME'] ?? 'DropX Admin');
 
 // =============================================
-// FIREBASE FUNCTIONS
+// CREATE/ALTER TABLES FOR NEW FEATURES
+// =============================================
+
+function createTablesIfNotExist($conn) {
+    // Admin notifications table - ADDED analytics columns
+    $conn->exec("
+        CREATE TABLE IF NOT EXISTS admin_notifications (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            message TEXT NOT NULL,
+            type VARCHAR(50) DEFAULT 'system',
+            audience VARCHAR(50) DEFAULT 'all',
+            segment VARCHAR(50),
+            target_count INT DEFAULT 0,
+            send_push TINYINT DEFAULT 1,
+            send_email TINYINT DEFAULT 0,
+            send_in_app TINYINT DEFAULT 1,
+            sent_count INT DEFAULT 0,
+            push_sent_count INT DEFAULT 0,
+            email_sent_count INT DEFAULT 0,
+            in_app_sent_count INT DEFAULT 0,
+            opened_count INT DEFAULT 0,
+            click_through_count INT DEFAULT 0,
+            status VARCHAR(20) DEFAULT 'pending',
+            scheduled_for DATETIME,
+            created_by INT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            sent_at TIMESTAMP NULL,
+            INDEX idx_type (type),
+            INDEX idx_status (status),
+            INDEX idx_created_at (created_at),
+            INDEX idx_scheduled_for (scheduled_for),
+            INDEX idx_audience (audience)
+        )
+    ");
+    
+    // Check if new columns exist, if not add them
+    try {
+        $conn->exec("ALTER TABLE admin_notifications ADD COLUMN IF NOT EXISTS opened_count INT DEFAULT 0");
+        $conn->exec("ALTER TABLE admin_notifications ADD COLUMN IF NOT EXISTS click_through_count INT DEFAULT 0");
+        $conn->exec("ALTER TABLE admin_notifications MODIFY COLUMN status VARCHAR(20) DEFAULT 'pending'");
+    } catch (PDOException $e) {
+        // Columns might already exist
+    }
+    
+    // Notification analytics table (tracks opens and clicks)
+    $conn->exec("
+        CREATE TABLE IF NOT EXISTS notification_analytics (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            notification_id INT NOT NULL,
+            user_id INT NOT NULL,
+            device_id INT,
+            action VARCHAR(50) NOT NULL,
+            user_agent TEXT,
+            ip_address VARCHAR(45),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (notification_id) REFERENCES admin_notifications(id) ON DELETE CASCADE,
+            INDEX idx_notification (notification_id),
+            INDEX idx_user (user_id),
+            INDEX idx_action (action),
+            INDEX idx_created_at (created_at)
+        )
+    ");
+    
+    // Notification schedule log
+    $conn->exec("
+        CREATE TABLE IF NOT EXISTS notification_schedule_log (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            notification_id INT NOT NULL,
+            scheduled_for DATETIME NOT NULL,
+            processed_at DATETIME,
+            status VARCHAR(20) DEFAULT 'pending',
+            error_message TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_notification (notification_id),
+            INDEX idx_status (status),
+            INDEX idx_scheduled_for (scheduled_for)
+        )
+    ");
+    
+    // Notification recipients table
+    $conn->exec("
+        CREATE TABLE IF NOT EXISTS notification_recipients (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            notification_id INT NOT NULL,
+            recipient_id INT NOT NULL,
+            recipient_type VARCHAR(50) NOT NULL,
+            recipient_name VARCHAR(255),
+            recipient_email VARCHAR(255),
+            push_sent TINYINT DEFAULT 0,
+            email_sent TINYINT DEFAULT 0,
+            in_app_sent TINYINT DEFAULT 0,
+            opened TINYINT DEFAULT 0,
+            clicked TINYINT DEFAULT 0,
+            opened_at DATETIME,
+            clicked_at DATETIME,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (notification_id) REFERENCES admin_notifications(id) ON DELETE CASCADE,
+            INDEX idx_notification (notification_id),
+            INDEX idx_recipient (recipient_id, recipient_type)
+        )
+    ");
+    
+    // Add new columns to notification_recipients if not exists
+    try {
+        $conn->exec("ALTER TABLE notification_recipients ADD COLUMN IF NOT EXISTS opened TINYINT DEFAULT 0");
+        $conn->exec("ALTER TABLE notification_recipients ADD COLUMN IF NOT EXISTS clicked TINYINT DEFAULT 0");
+        $conn->exec("ALTER TABLE notification_recipients ADD COLUMN IF NOT EXISTS opened_at DATETIME");
+        $conn->exec("ALTER TABLE notification_recipients ADD COLUMN IF NOT EXISTS clicked_at DATETIME");
+    } catch (PDOException $e) {
+        // Columns might already exist
+    }
+}
+
+createTablesIfNotExist($conn);
+
+// =============================================
+// FIREBASE FUNCTIONS (SAME AS BEFORE)
 // =============================================
 
 function createAndExchangeJWT($serviceAccount) {
