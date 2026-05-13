@@ -203,6 +203,9 @@ function getFCMAccessToken() {
     return null;
 }
 
+// =============================================
+// FIXED: SEND PUSH NOTIFICATION - CORRECTED FOR FCM v1
+// =============================================
 function sendPushNotification($deviceToken, $title, $message, $type = 'general', $data = []) {
     global $firebaseProjectId;
     if (empty($deviceToken)) return false;
@@ -213,32 +216,39 @@ function sendPushNotification($deviceToken, $title, $message, $type = 'general',
         return false;
     }
     
+    // Ensure all data values are strings (FCM requires string values)
+    $stringData = [];
+    foreach ($data as $key => $value) {
+        $stringData[$key] = is_bool($value) ? ($value ? 'true' : 'false') : (string)$value;
+    }
+    
+    // Add standard fields
+    $stringData['type'] = $type;
+    $stringData['title'] = $title;
+    $stringData['message'] = $message;
+    $stringData['timestamp'] = date('c');
+    $stringData['click_action'] = 'FLUTTER_NOTIFICATION_CLICK';
+    
     $payload = [
         'message' => [
             'token' => $deviceToken,
             'notification' => [
                 'title' => $title,
-                'body' => $message,
-                'sound' => 'default'
+                'body' => $message
+                // 'sound' is NOT supported here in FCM v1 - removed
             ],
-            'data' => array_merge([
-                'type' => $type,
-                'title' => $title,
-                'message' => $message,
-                'timestamp' => date('c'),
-                'click_action' => 'FLUTTER_NOTIFICATION_CLICK'
-            ], $data),
+            'data' => $stringData,
             'android' => [
                 'priority' => 'high',
                 'notification' => [
-                    'sound' => 'default',
+                    'sound' => 'default',  // 'sound' goes here for Android
                     'channel_id' => 'customer_notifications'
                 ]
             ],
             'apns' => [
                 'payload' => [
                     'aps' => [
-                        'sound' => 'default',
+                        'sound' => 'default',  // 'sound' goes here for iOS
                         'badge' => 1
                     ]
                 ]
@@ -246,8 +256,10 @@ function sendPushNotification($deviceToken, $title, $message, $type = 'general',
         ]
     ];
     
+    $url = "https://fcm.googleapis.com/v1/projects/" . $firebaseProjectId . "/messages:send";
+    
     $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, "https://fcm.googleapis.com/v1/projects/" . $firebaseProjectId . "/messages:send");
+    curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -262,12 +274,13 @@ function sendPushNotification($deviceToken, $title, $message, $type = 'general',
     $error = curl_error($ch);
     curl_close($ch);
     
-    if ($httpCode !== 200) {
-        error_log("FCM push failed: HTTP $httpCode, Response: $response, Error: $error");
-        return false;
+    if ($httpCode === 200) {
+        error_log("Push sent successfully to token: " . substr($deviceToken, 0, 20) . "...");
+        return true;
     }
     
-    return true;
+    error_log("FCM push failed: HTTP $httpCode, Response: $response, Error: $error");
+    return false;
 }
 
 function sendEmailNotification($email, $subject, $message) {
@@ -690,7 +703,6 @@ function getUserAllDevices($conn, $userId) {
 // DEBUG FUNCTION - Check device tokens
 // =============================================
 function debugDeviceTokens($conn) {
-    // Check how many devices have tokens
     $stmt = $conn->query("
         SELECT COUNT(*) as total, 
                SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active,
@@ -699,7 +711,6 @@ function debugDeviceTokens($conn) {
     ");
     $stats = $stmt->fetch(PDO::FETCH_ASSOC);
     
-    // Get sample users with devices
     $stmt = $conn->query("
         SELECT u.id, u.email, u.full_name, 
                COUNT(ud.id) as device_count,
