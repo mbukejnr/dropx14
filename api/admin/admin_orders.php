@@ -33,11 +33,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
+
 // =============================================
 // REQUIRE AUTH FILES
 // =============================================
-require_once __DIR__ . '/../config/admin_database.php';
-require_once __DIR__ . '/../includes/admin_auth.php';
+require_once __DIR__ . '/../../config/admin_database.php';
+require_once __DIR__ . '/../../includes/admin_auth.php';
 
 $db = AdminDatabase::getInstance();
 $conn = $db->getConnection();
