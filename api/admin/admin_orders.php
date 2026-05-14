@@ -349,7 +349,7 @@ try {
         $search = isset($_GET['search']) ? trim($_GET['search']) : '';
         $limit = isset($_GET['limit']) ? min(200, max(1, intval($_GET['limit']))) : 100;
         
-        $where = ["u.verified = 1"];
+        $where = [];
         $params = [];
         
         if ($search) {
