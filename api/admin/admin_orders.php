@@ -1,37 +1,13 @@
-
-
-
-
 <?php
 
 // =============================================
-// STEP 1: OPTIONS HANDLER - MUST BE ABSOLUTE FIRST
-// =============================================
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    header("Access-Control-Allow-Origin: https://frontend-pink-pi-70.vercel.app");
-    header("Access-Control-Allow-Credentials: true");
-    header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
-    header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, Origin");
-    header("Access-Control-Max-Age: 86400");
-    http_response_code(200);
-    exit();
-}
-
-// =============================================
-// STEP 2: ERROR REPORTING (After OPTIONS)
-// =============================================
-error_reporting(0);
-ini_set('display_errors', 0);
-
-// =============================================
-// STEP 3: CORS HEADERS FOR NON-OPTIONS REQUESTS
+// CORS HEADERS
 // =============================================
 $allowed_origins = [
     'https://frontend-pink-pi-70.vercel.app',
     'http://localhost:3000',
     'http://localhost:3001',
-    'http://localhost:5173',
-    'https://dropxdelivery.com'
+    'http://localhost:5173'
 ];
 
 $origin = isset($_SERVER['HTTP_ORIGIN']) ? $_SERVER['HTTP_ORIGIN'] : '';
@@ -44,10 +20,15 @@ if (in_array($origin, $allowed_origins)) {
 
 header("Access-Control-Allow-Credentials: true");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, Origin");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
 header("Access-Control-Expose-Headers: Content-Disposition");
 header("Content-Type: application/json; charset=UTF-8");
 
+// Handle preflight OPTIONS request
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
 
 // =============================================
 // REQUIRE AUTH FILES
