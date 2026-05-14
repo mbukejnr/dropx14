@@ -357,7 +357,8 @@ try {
             $params[':search'] = "%$search%";
         }
         
-        $whereClause = "WHERE " . implode(" AND ", $where);
+        // 🔥 FIXED: Only add WHERE if there are conditions
+        $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
         
         $sql = "SELECT 
                     u.id, 
