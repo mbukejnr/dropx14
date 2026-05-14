@@ -1,7 +1,10 @@
+
+
+
+
 <?php
 // backend/api/admin/admin_orders.php
-// ADMIN ORDER MANAGEMENT API - ORDER PAGE ONLY
-// Notifications are triggered automatically, managed separately by Notification Page
+// ADMIN ORDER MANAGEMENT API - COMPLETE VERSION
 
 // =============================================
 // SUPPRESS ALL WARNINGS FOR CLEAN OUTPUT
@@ -79,26 +82,19 @@ function generateOrderNumber() {
 }
 
 // =============================================
-// AUTOMATIC NOTIFICATION FUNCTION (Internal Use Only)
+// AUTOMATIC NOTIFICATION FUNCTION
 // =============================================
 
-/**
- * Automatically send order notification when status changes
- * This is called internally, not exposed as an API endpoint
- */
 function autoSendOrderNotification($conn, $orderId, $orderNumber, $customerId, $merchantId, $driverId, $oldStatus, $newStatus, $reason = '') {
     try {
-        // Get customer info
         $customerStmt = $conn->prepare("SELECT full_name, email FROM users WHERE id = :id");
         $customerStmt->execute([':id' => $customerId]);
         $customer = $customerStmt->fetch(PDO::FETCH_ASSOC);
         
-        // Get merchant info
         $merchantStmt = $conn->prepare("SELECT name, email, device_token FROM merchants WHERE id = :id");
         $merchantStmt->execute([':id' => $merchantId]);
         $merchant = $merchantStmt->fetch(PDO::FETCH_ASSOC);
         
-        // Define notification messages based on status
         $customerMessages = [
             'pending' => [
                 'title' => 'Order Received 🛍️',
@@ -155,7 +151,6 @@ function autoSendOrderNotification($conn, $orderId, $orderNumber, $customerId, $
             ]
         ];
         
-        // Insert notification into database (in-app)
         if (isset($customerMessages[$newStatus])) {
             $notif = $customerMessages[$newStatus];
             $inAppStmt = $conn->prepare("
@@ -171,7 +166,6 @@ function autoSendOrderNotification($conn, $orderId, $orderNumber, $customerId, $
             ]);
         }
         
-        // Send push notification to customer if they have device tokens
         if (isset($customerMessages[$newStatus])) {
             $notif = $customerMessages[$newStatus];
             $deviceStmt = $conn->prepare("
@@ -187,7 +181,6 @@ function autoSendOrderNotification($conn, $orderId, $orderNumber, $customerId, $
             }
         }
         
-        // Send notification to merchant for relevant status changes
         if (isset($merchantMessages[$newStatus]) && $merchant) {
             $notif = $merchantMessages[$newStatus];
             
@@ -331,7 +324,6 @@ function createAndExchangeJWT($serviceAccount) {
     }
     return null;
 }
-
 // =============================================
 // 1. GET ALL ORDERS (LIST)
 // =============================================
@@ -343,6 +335,8 @@ if ($method === 'GET' && $action === 'list') {
     $search = isset($_GET['search']) ? trim($_GET['search']) : '';
     $status = isset($_GET['status']) ? $_GET['status'] : '';
     $merchantId = isset($_GET['merchant_id']) ? intval($_GET['merchant_id']) : null;
+    $customerId = isset($_GET['customer_id']) ? intval($_GET['customer_id']) : null;
+    $driverId = isset($_GET['driver_id']) ? intval($_GET['driver_id']) : null;
     $dateFrom = isset($_GET['date_from']) ? $_GET['date_from'] : '';
     $dateTo = isset($_GET['date_to']) ? $_GET['date_to'] : '';
     $offset = ($page - 1) * $limit;
@@ -363,6 +357,16 @@ if ($method === 'GET' && $action === 'list') {
     if ($merchantId) {
         $where[] = "o.merchant_id = :merchant_id";
         $params[':merchant_id'] = $merchantId;
+    }
+    
+    if ($customerId) {
+        $where[] = "o.user_id = :customer_id";
+        $params[':customer_id'] = $customerId;
+    }
+    
+    if ($driverId) {
+        $where[] = "o.driver_id = :driver_id";
+        $params[':driver_id'] = $driverId;
     }
     
     if ($dateFrom) {
@@ -411,18 +415,30 @@ if ($method === 'GET' && $action === 'list') {
     $stmt->execute();
     $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
+    // Format orders
+    foreach ($orders as &$order) {
+        $order['formatted_total'] = formatCurrency($order['total_amount']);
+        $order['formatted_created'] = formatDate($order['created_at']);
+    }
+    
+    // Get merchants for filter
     $merchantsStmt = $conn->query("SELECT id, name FROM merchants WHERE is_active = 1 ORDER BY name");
     $merchants = $merchantsStmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // Fetch customers for dropdown
+    // Get customers for filter - FIXED: Use verified instead of is_active
     $customersStmt = $conn->query("
-        SELECT id, full_name as name, email, phone, is_active 
+        SELECT id, full_name as name, email, phone, verified as is_active 
         FROM users 
-        WHERE is_active = 1 
+        WHERE verified = 1
         ORDER BY full_name ASC
     ");
     $customers = $customersStmt->fetchAll(PDO::FETCH_ASSOC);
     
+    // Get drivers for filter
+    $driversStmt = $conn->query("SELECT id, full_name as name FROM drivers WHERE is_active = 1 ORDER BY full_name");
+    $drivers = $driversStmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Get status counts
     $statusCounts = [];
     $statusSql = "SELECT status, COUNT(*) as count FROM orders GROUP BY status";
     $statusStmt = $conn->query($statusSql);
@@ -434,6 +450,7 @@ if ($method === 'GET' && $action === 'list') {
         'orders' => $orders,
         'merchants' => $merchants,
         'customers' => $customers,
+        'drivers' => $drivers,
         'status_counts' => $statusCounts,
         'pagination' => [
             'current_page' => $page,
@@ -443,7 +460,6 @@ if ($method === 'GET' && $action === 'list') {
         ]
     ]);
 }
-
 // =============================================
 // 2. GET SINGLE ORDER DETAILS
 // =============================================
@@ -469,6 +485,7 @@ elseif ($method === 'GET' && $orderId && $action === 'details') {
         $db->sendError('Order not found', 404);
     }
     
+    // Get order items
     $itemsStmt = $conn->prepare("
         SELECT oi.*, oi.add_ons_json as add_ons
         FROM order_items oi
@@ -482,8 +499,11 @@ elseif ($method === 'GET' && $orderId && $action === 'details') {
         if (!empty($item['add_ons'])) {
             $item['add_ons'] = json_decode($item['add_ons'], true);
         }
+        $item['formatted_price'] = formatCurrency($item['price']);
+        $item['formatted_total'] = formatCurrency($item['total']);
     }
     
+    // Get status history
     $historyStmt = $conn->prepare("
         SELECT * FROM order_status_history 
         WHERE order_id = :order_id 
@@ -492,15 +512,30 @@ elseif ($method === 'GET' && $orderId && $action === 'details') {
     $historyStmt->execute([':order_id' => $orderId]);
     $history = $historyStmt->fetchAll(PDO::FETCH_ASSOC);
     
+    foreach ($history as &$h) {
+        $h['formatted_date'] = formatDate($h['created_at']);
+    }
+    
+    // Get order notes
+    $notesStmt = $conn->prepare("
+        SELECT onotes.*, a.full_name as admin_name
+        FROM order_notes onotes
+        LEFT JOIN admin_users a ON onotes.admin_id = a.id
+        WHERE onotes.order_id = :order_id
+        ORDER BY onotes.created_at DESC
+    ");
+    $notesStmt->execute([':order_id' => $orderId]);
+    $notes = $notesStmt->fetchAll(PDO::FETCH_ASSOC);
+    
     $db->sendResponse([
         'order' => $order,
         'items' => $items,
-        'status_history' => $history
+        'status_history' => $history,
+        'notes' => $notes
     ]);
 }
-
 // =============================================
-// 2.5 GET CUSTOMERS FOR CREATE ORDER DROPDOWN
+// 3. GET CUSTOMERS FOR DROPDOWN (FIXED)
 // =============================================
 elseif ($method === 'GET' && $action === 'get-customers') {
     checkPermission('view_orders', $auth, $db);
@@ -508,7 +543,8 @@ elseif ($method === 'GET' && $action === 'get-customers') {
     $search = isset($_GET['search']) ? trim($_GET['search']) : '';
     $limit = isset($_GET['limit']) ? min(200, max(1, intval($_GET['limit']))) : 100;
     
-    $where = ["u.is_active = 1"];
+    // FIXED: Use verified instead of is_active
+    $where = ["u.verified = 1"];
     $params = [];
     
     if ($search) {
@@ -523,10 +559,12 @@ elseif ($method === 'GET' && $action === 'get-customers') {
                 u.full_name as name, 
                 u.email, 
                 u.phone,
-                u.is_active,
-                COUNT(o.id) as total_orders
+                u.verified as is_active,
+                u.total_orders,
+                COUNT(o.id) as order_count,
+                COALESCE(SUM(o.total_amount), 0) as total_spent
             FROM users u
-            LEFT JOIN orders o ON u.id = o.user_id
+            LEFT JOIN orders o ON u.id = o.user_id AND o.status = 'delivered'
             $whereClause
             GROUP BY u.id
             ORDER BY u.full_name ASC
@@ -540,38 +578,44 @@ elseif ($method === 'GET' && $action === 'get-customers') {
     $stmt->execute();
     $customers = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // Also fetch customer addresses if needed
+    // Get customer addresses from addresses table
     $customerIds = array_column($customers, 'id');
-    $addresses = [];
-    
     if (!empty($customerIds)) {
         $placeholders = implode(',', array_fill(0, count($customerIds), '?'));
         $addrStmt = $conn->prepare("
-            SELECT user_id, address, is_default 
-            FROM delivery_addresses 
+            SELECT user_id, formatted_address as address, label, is_default
+            FROM addresses 
             WHERE user_id IN ($placeholders) 
             ORDER BY is_default DESC
         ");
         $addrStmt->execute($customerIds);
         while ($row = $addrStmt->fetch(PDO::FETCH_ASSOC)) {
-            if (!isset($addresses[$row['user_id']])) {
-                $addresses[$row['user_id']] = [];
+            foreach ($customers as &$customer) {
+                if ($customer['id'] == $row['user_id']) {
+                    if (!isset($customer['addresses'])) {
+                        $customer['addresses'] = [];
+                    }
+                    $customer['addresses'][] = [
+                        'address' => $row['address'],
+                        'label' => $row['label'],
+                        'is_default' => (bool)$row['is_default']
+                    ];
+                }
             }
-            $addresses[$row['user_id']][] = [
-                'address' => $row['address'],
-                'is_default' => (bool)$row['is_default']
-            ];
         }
     }
     
-    // Attach addresses to customers
+    // Set default address for each customer
     foreach ($customers as &$customer) {
-        $customer['addresses'] = $addresses[$customer['id']] ?? [];
-        $customer['default_address'] = $customer['addresses'][0]['address'] ?? '';
+        if (!isset($customer['addresses'])) {
+            $customer['addresses'] = [];
+        }
+        $customer['default_address'] = !empty($customer['addresses']) ? $customer['addresses'][0]['address'] : '';
+        $customer['formatted_total_spent'] = formatCurrency($customer['total_spent']);
     }
     
     // Get total count
-    $countSql = "SELECT COUNT(*) as total FROM users u WHERE u.is_active = 1";
+    $countSql = "SELECT COUNT(*) as total FROM users u WHERE u.verified = 1";
     if ($search) {
         $countSql .= " AND (u.full_name LIKE :search OR u.email LIKE :search OR u.phone LIKE :search)";
     }
@@ -590,7 +634,7 @@ elseif ($method === 'GET' && $action === 'get-customers') {
 }
 
 // =============================================
-// 2.6 SEARCH CUSTOMERS (for autocomplete)
+// 4. SEARCH CUSTOMERS (FIXED)
 // =============================================
 elseif ($method === 'GET' && $action === 'search-customers') {
     checkPermission('view_orders', $auth, $db);
@@ -605,16 +649,19 @@ elseif ($method === 'GET' && $action === 'search-customers') {
         ]);
     }
     
+    // FIXED: Use verified instead of is_active
     $stmt = $conn->prepare("
         SELECT 
             u.id, 
             u.full_name as name, 
             u.email, 
             u.phone,
-            u.is_active,
-            (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as total_orders
+            u.verified as is_active,
+            u.total_orders,
+            (SELECT COUNT(*) FROM orders WHERE user_id = u.id AND status = 'delivered') as completed_orders,
+            (SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE user_id = u.id AND status = 'delivered') as total_spent
         FROM users u
-        WHERE u.is_active = 1 
+        WHERE u.verified = 1 
         AND (u.full_name LIKE :search 
              OR u.email LIKE :search 
              OR u.phone LIKE :search)
@@ -637,6 +684,10 @@ elseif ($method === 'GET' && $action === 'search-customers') {
     
     $customers = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
+    foreach ($customers as &$customer) {
+        $customer['formatted_total_spent'] = formatCurrency($customer['total_spent']);
+    }
+    
     $db->sendResponse([
         'customers' => $customers,
         'total' => count($customers)
@@ -644,15 +695,15 @@ elseif ($method === 'GET' && $action === 'search-customers') {
 }
 
 // =============================================
-// 2.7 GET CUSTOMER ADDRESSES
+// 5. GET CUSTOMER ADDRESSES
 // =============================================
 elseif ($method === 'GET' && $action === 'customer-addresses' && isset($_GET['customer_id'])) {
     checkPermission('view_orders', $auth, $db);
     
     $customerId = intval($_GET['customer_id']);
     
-    // Verify customer exists
-    $checkStmt = $conn->prepare("SELECT id, full_name FROM users WHERE id = :id AND is_active = 1");
+    // Verify customer exists - FIXED: removed is_active
+    $checkStmt = $conn->prepare("SELECT id, full_name, email, phone FROM users WHERE id = :id");
     $checkStmt->execute([':id' => $customerId]);
     $customer = $checkStmt->fetch(PDO::FETCH_ASSOC);
     
@@ -660,26 +711,26 @@ elseif ($method === 'GET' && $action === 'customer-addresses' && isset($_GET['cu
         $db->sendError('Customer not found', 404);
     }
     
-    // Get addresses
+    // Get addresses from addresses table
     $addrStmt = $conn->prepare("
-        SELECT id, address, is_default, address_type, landmark, instructions
-        FROM delivery_addresses 
+        SELECT id, formatted_address as address, label, is_default, landmark, instructions, latitude, longitude
+        FROM addresses 
         WHERE user_id = :user_id 
         ORDER BY is_default DESC, created_at DESC
     ");
     $addrStmt->execute([':user_id' => $customerId]);
     $addresses = $addrStmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // If no addresses in delivery_addresses table, get from orders
+    // If no addresses in addresses table, get from orders
     if (empty($addresses)) {
         $orderAddrStmt = $conn->prepare("
-            SELECT DISTINCT delivery_address as address
+            SELECT DISTINCT delivery_address as address, delivery_latitude as latitude, delivery_longitude as longitude
             FROM orders 
             WHERE user_id = :user_id 
             AND delivery_address IS NOT NULL 
             AND delivery_address != ''
             ORDER BY created_at DESC
-            LIMIT 5
+            LIMIT 10
         ");
         $orderAddrStmt->execute([':user_id' => $customerId]);
         $orderAddresses = $orderAddrStmt->fetchAll(PDO::FETCH_ASSOC);
@@ -688,10 +739,12 @@ elseif ($method === 'GET' && $action === 'customer-addresses' && isset($_GET['cu
             $addresses[] = [
                 'id' => null,
                 'address' => $addr['address'],
+                'label' => 'Previous Order',
                 'is_default' => false,
-                'address_type' => 'previous',
                 'landmark' => null,
-                'instructions' => null
+                'instructions' => null,
+                'latitude' => $addr['latitude'],
+                'longitude' => $addr['longitude']
             ];
         }
     }
@@ -699,30 +752,254 @@ elseif ($method === 'GET' && $action === 'customer-addresses' && isset($_GET['cu
     $db->sendResponse([
         'customer_id' => $customerId,
         'customer_name' => $customer['full_name'],
+        'customer_email' => $customer['email'],
+        'customer_phone' => $customer['phone'],
         'addresses' => $addresses
+    ]);
+}
+// =============================================
+// 3. GET CUSTOMERS FOR DROPDOWN (FIXED)
+// =============================================
+elseif ($method === 'GET' && $action === 'get-customers') {
+    checkPermission('view_orders', $auth, $db);
+    
+    $search = isset($_GET['search']) ? trim($_GET['search']) : '';
+    $limit = isset($_GET['limit']) ? min(200, max(1, intval($_GET['limit']))) : 100;
+    
+    // FIXED: Use verified instead of is_active
+    $where = ["u.verified = 1"];
+    $params = [];
+    
+    if ($search) {
+        $where[] = "(u.full_name LIKE :search OR u.email LIKE :search OR u.phone LIKE :search)";
+        $params[':search'] = "%$search%";
+    }
+    
+    $whereClause = "WHERE " . implode(" AND ", $where);
+    
+    $sql = "SELECT 
+                u.id, 
+                u.full_name as name, 
+                u.email, 
+                u.phone,
+                u.verified as is_active,
+                u.total_orders,
+                COUNT(o.id) as order_count,
+                COALESCE(SUM(o.total_amount), 0) as total_spent
+            FROM users u
+            LEFT JOIN orders o ON u.id = o.user_id AND o.status = 'delivered'
+            $whereClause
+            GROUP BY u.id
+            ORDER BY u.full_name ASC
+            LIMIT :limit";
+    
+    $stmt = $conn->prepare($sql);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    foreach ($params as $key => $value) {
+        $stmt->bindValue($key, $value);
+    }
+    $stmt->execute();
+    $customers = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Get customer addresses from addresses table
+    $customerIds = array_column($customers, 'id');
+    if (!empty($customerIds)) {
+        $placeholders = implode(',', array_fill(0, count($customerIds), '?'));
+        $addrStmt = $conn->prepare("
+            SELECT user_id, formatted_address as address, label, is_default
+            FROM addresses 
+            WHERE user_id IN ($placeholders) 
+            ORDER BY is_default DESC
+        ");
+        $addrStmt->execute($customerIds);
+        while ($row = $addrStmt->fetch(PDO::FETCH_ASSOC)) {
+            foreach ($customers as &$customer) {
+                if ($customer['id'] == $row['user_id']) {
+                    if (!isset($customer['addresses'])) {
+                        $customer['addresses'] = [];
+                    }
+                    $customer['addresses'][] = [
+                        'address' => $row['address'],
+                        'label' => $row['label'],
+                        'is_default' => (bool)$row['is_default']
+                    ];
+                }
+            }
+        }
+    }
+    
+    // Set default address for each customer
+    foreach ($customers as &$customer) {
+        if (!isset($customer['addresses'])) {
+            $customer['addresses'] = [];
+        }
+        $customer['default_address'] = !empty($customer['addresses']) ? $customer['addresses'][0]['address'] : '';
+        $customer['formatted_total_spent'] = formatCurrency($customer['total_spent']);
+    }
+    
+    // Get total count
+    $countSql = "SELECT COUNT(*) as total FROM users u WHERE u.verified = 1";
+    if ($search) {
+        $countSql .= " AND (u.full_name LIKE :search OR u.email LIKE :search OR u.phone LIKE :search)";
+    }
+    $countStmt = $conn->prepare($countSql);
+    foreach ($params as $key => $value) {
+        $countStmt->bindValue($key, $value);
+    }
+    $countStmt->execute();
+    $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
+    
+    $db->sendResponse([
+        'customers' => $customers,
+        'total' => intval($total),
+        'limit' => $limit
     ]);
 }
 
 // =============================================
-// 3. CREATE NEW ORDER (ENHANCED)
+// 4. SEARCH CUSTOMERS (FIXED)
+// =============================================
+elseif ($method === 'GET' && $action === 'search-customers') {
+    checkPermission('view_orders', $auth, $db);
+    
+    $search = isset($_GET['q']) ? trim($_GET['q']) : '';
+    $limit = isset($_GET['limit']) ? min(50, max(1, intval($_GET['limit']))) : 20;
+    
+    if (strlen($search) < 2) {
+        $db->sendResponse([
+            'customers' => [],
+            'total' => 0
+        ]);
+    }
+    
+    // FIXED: Use verified instead of is_active
+    $stmt = $conn->prepare("
+        SELECT 
+            u.id, 
+            u.full_name as name, 
+            u.email, 
+            u.phone,
+            u.verified as is_active,
+            u.total_orders,
+            (SELECT COUNT(*) FROM orders WHERE user_id = u.id AND status = 'delivered') as completed_orders,
+            (SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE user_id = u.id AND status = 'delivered') as total_spent
+        FROM users u
+        WHERE u.verified = 1 
+        AND (u.full_name LIKE :search 
+             OR u.email LIKE :search 
+             OR u.phone LIKE :search)
+        ORDER BY 
+            CASE 
+                WHEN u.full_name LIKE :exact THEN 1
+                WHEN u.full_name LIKE :starts THEN 2
+                ELSE 3
+            END,
+            u.full_name ASC
+        LIMIT :limit
+    ");
+    
+    $searchTerm = "%$search%";
+    $stmt->bindValue(':search', $searchTerm);
+    $stmt->bindValue(':exact', $search);
+    $stmt->bindValue(':starts', "$search%");
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->execute();
+    
+    $customers = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    foreach ($customers as &$customer) {
+        $customer['formatted_total_spent'] = formatCurrency($customer['total_spent']);
+    }
+    
+    $db->sendResponse([
+        'customers' => $customers,
+        'total' => count($customers)
+    ]);
+}
+
+// =============================================
+// 5. GET CUSTOMER ADDRESSES
+// =============================================
+elseif ($method === 'GET' && $action === 'customer-addresses' && isset($_GET['customer_id'])) {
+    checkPermission('view_orders', $auth, $db);
+    
+    $customerId = intval($_GET['customer_id']);
+    
+    // Verify customer exists - FIXED: removed is_active
+    $checkStmt = $conn->prepare("SELECT id, full_name, email, phone FROM users WHERE id = :id");
+    $checkStmt->execute([':id' => $customerId]);
+    $customer = $checkStmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$customer) {
+        $db->sendError('Customer not found', 404);
+    }
+    
+    // Get addresses from addresses table
+    $addrStmt = $conn->prepare("
+        SELECT id, formatted_address as address, label, is_default, landmark, instructions, latitude, longitude
+        FROM addresses 
+        WHERE user_id = :user_id 
+        ORDER BY is_default DESC, created_at DESC
+    ");
+    $addrStmt->execute([':user_id' => $customerId]);
+    $addresses = $addrStmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // If no addresses in addresses table, get from orders
+    if (empty($addresses)) {
+        $orderAddrStmt = $conn->prepare("
+            SELECT DISTINCT delivery_address as address, delivery_latitude as latitude, delivery_longitude as longitude
+            FROM orders 
+            WHERE user_id = :user_id 
+            AND delivery_address IS NOT NULL 
+            AND delivery_address != ''
+            ORDER BY created_at DESC
+            LIMIT 10
+        ");
+        $orderAddrStmt->execute([':user_id' => $customerId]);
+        $orderAddresses = $orderAddrStmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        foreach ($orderAddresses as $addr) {
+            $addresses[] = [
+                'id' => null,
+                'address' => $addr['address'],
+                'label' => 'Previous Order',
+                'is_default' => false,
+                'landmark' => null,
+                'instructions' => null,
+                'latitude' => $addr['latitude'],
+                'longitude' => $addr['longitude']
+            ];
+        }
+    }
+    
+    $db->sendResponse([
+        'customer_id' => $customerId,
+        'customer_name' => $customer['full_name'],
+        'customer_email' => $customer['email'],
+        'customer_phone' => $customer['phone'],
+        'addresses' => $addresses
+    ]);
+}
+// =============================================
+// 6. CREATE NEW ORDER (FIXED)
 // =============================================
 elseif ($method === 'POST' && $action === 'create') {
     checkPermission('create_orders', $auth, $db);
     
     $data = json_decode(file_get_contents('php://input'), true);
     
-    // Enhanced validation
+    // Validation
     if (empty($data['user_id'])) {
         $db->sendError('Customer is required. Please select a customer.', 400);
     }
     
-    // Verify customer exists
-    $customerCheck = $conn->prepare("SELECT id, full_name, email, phone FROM users WHERE id = :id AND is_active = 1");
+    // FIXED: No is_active check - just verify customer exists
+    $customerCheck = $conn->prepare("SELECT id, full_name, email, phone FROM users WHERE id = :id");
     $customerCheck->execute([':id' => $data['user_id']]);
     $customer = $customerCheck->fetch(PDO::FETCH_ASSOC);
     
     if (!$customer) {
-        $db->sendError('Invalid customer selected. Customer not found or inactive.', 400);
+        $db->sendError('Invalid customer selected. Customer not found.', 400);
     }
     
     if (empty($data['merchant_id'])) {
@@ -774,19 +1051,22 @@ elseif ($method === 'POST' && $action === 'create') {
         
         $deliveryFee = isset($data['delivery_fee']) ? floatval($data['delivery_fee']) : 0;
         $discountAmount = isset($data['discount_amount']) ? floatval($data['discount_amount']) : 0;
-        $totalAmount = $subtotal + $deliveryFee - $discountAmount;
+        $tipAmount = isset($data['tip_amount']) ? floatval($data['tip_amount']) : 0;
+        $totalAmount = $subtotal + $deliveryFee + $tipAmount - $discountAmount;
         $orderNumber = generateOrderNumber();
         $initialStatus = $data['status'] ?? 'pending';
         
         $orderStmt = $conn->prepare("
             INSERT INTO orders (
                 order_number, user_id, merchant_id, status, subtotal, delivery_fee,
-                discount_amount, total_amount, payment_method, payment_status,
-                delivery_address, special_instructions, driver_id, created_at, updated_at
+                tip_amount, discount_amount, total_amount, payment_method, payment_status,
+                delivery_address, delivery_latitude, delivery_longitude, special_instructions, 
+                driver_id, created_at, updated_at
             ) VALUES (
                 :order_number, :user_id, :merchant_id, :status, :subtotal, :delivery_fee,
-                :discount_amount, :total_amount, :payment_method, :payment_status,
-                :delivery_address, :special_instructions, :driver_id, NOW(), NOW()
+                :tip_amount, :discount_amount, :total_amount, :payment_method, :payment_status,
+                :delivery_address, :delivery_latitude, :delivery_longitude, :special_instructions, 
+                :driver_id, NOW(), NOW()
             )
         ");
         
@@ -797,29 +1077,33 @@ elseif ($method === 'POST' && $action === 'create') {
             ':status' => $initialStatus,
             ':subtotal' => $subtotal,
             ':delivery_fee' => $deliveryFee,
+            ':tip_amount' => $tipAmount,
             ':discount_amount' => $discountAmount,
             ':total_amount' => $totalAmount,
-            ':payment_method' => $data['payment_method'] ?? 'cash',
+            ':payment_method' => $data['payment_method'] ?? 'cash_on_delivery',
             ':payment_status' => $data['payment_status'] ?? 'pending',
             ':delivery_address' => $data['delivery_address'],
+            ':delivery_latitude' => $data['delivery_latitude'] ?? null,
+            ':delivery_longitude' => $data['delivery_longitude'] ?? null,
             ':special_instructions' => $data['special_instructions'] ?? null,
             ':driver_id' => $data['driver_id'] ?? null
         ]);
         
         $newOrderId = $conn->lastInsertId();
         
+        // Insert order items
         $itemStmt = $conn->prepare("
             INSERT INTO order_items (
-                order_id, name, price, quantity, add_ons_json, special_instructions, total
+                order_id, item_name, price, quantity, add_ons_json, special_instructions, total
             ) VALUES (
-                :order_id, :name, :price, :quantity, :add_ons_json, :special_instructions, :total
+                :order_id, :item_name, :price, :quantity, :add_ons_json, :special_instructions, :total
             )
         ");
         
         foreach ($itemsData as $item) {
             $itemStmt->execute([
                 ':order_id' => $newOrderId,
-                ':name' => $item['name'],
+                ':item_name' => $item['name'],
                 ':price' => $item['price'],
                 ':quantity' => $item['quantity'],
                 ':add_ons_json' => $item['add_ons_json'],
@@ -828,10 +1112,10 @@ elseif ($method === 'POST' && $action === 'create') {
             ]);
         }
         
-        // Save address to delivery_addresses if not exists
+        // Save address to addresses table if not exists
         $checkAddrStmt = $conn->prepare("
-            SELECT id FROM delivery_addresses 
-            WHERE user_id = :user_id AND address = :address
+            SELECT id FROM addresses 
+            WHERE user_id = :user_id AND formatted_address = :address
         ");
         $checkAddrStmt->execute([
             ':user_id' => $data['user_id'],
@@ -840,15 +1124,21 @@ elseif ($method === 'POST' && $action === 'create') {
         
         if (!$checkAddrStmt->fetch()) {
             $saveAddrStmt = $conn->prepare("
-                INSERT INTO delivery_addresses (user_id, address, is_default, created_at)
-                VALUES (:user_id, :address, 0, NOW())
+                INSERT INTO addresses (
+                    user_id, formatted_address, label, latitude, longitude, created_at
+                ) VALUES (
+                    :user_id, :address, 'Saved Address', :latitude, :longitude, NOW()
+                )
             ");
             $saveAddrStmt->execute([
                 ':user_id' => $data['user_id'],
-                ':address' => $data['delivery_address']
+                ':address' => $data['delivery_address'],
+                ':latitude' => $data['delivery_latitude'] ?? null,
+                ':longitude' => $data['delivery_longitude'] ?? null
             ]);
         }
         
+        // Add status history
         $historyStmt = $conn->prepare("
             INSERT INTO order_status_history (
                 order_id, old_status, new_status, changed_by, changed_by_id, notes, created_at
@@ -873,6 +1163,7 @@ elseif ($method === 'POST' && $action === 'create') {
             'order_id' => $newOrderId,
             'order_number' => $orderNumber,
             'total_amount' => $totalAmount,
+            'formatted_total' => formatCurrency($totalAmount),
             'customer' => $customer
         ], 'Order created successfully');
         
@@ -881,9 +1172,8 @@ elseif ($method === 'POST' && $action === 'create') {
         $db->sendError('Failed to create order: ' . $e->getMessage(), 500);
     }
 }
-
 // =============================================
-// 4. UPDATE ORDER STATUS (WITH AUTO NOTIFICATION)
+// 7. UPDATE ORDER STATUS
 // =============================================
 elseif ($method === 'PUT' && $orderId && $action === 'update-status') {
     checkPermission('edit_orders', $auth, $db);
@@ -921,6 +1211,7 @@ elseif ($method === 'PUT' && $orderId && $action === 'update-status') {
         ':id' => $orderId
     ]);
     
+    // Add status history
     $historyStmt = $conn->prepare("
         INSERT INTO order_status_history (order_id, old_status, new_status, changed_by, changed_by_id, notes, created_at)
         VALUES (:order_id, :old_status, :new_status, 'admin', :admin_id, :notes, NOW())
@@ -946,7 +1237,7 @@ elseif ($method === 'PUT' && $orderId && $action === 'update-status') {
 }
 
 // =============================================
-// 5. BULK UPDATE ORDER STATUS
+// 8. BULK UPDATE ORDER STATUS
 // =============================================
 elseif ($method === 'POST' && $action === 'bulk-status') {
     checkPermission('edit_orders', $auth, $db);
@@ -966,15 +1257,18 @@ elseif ($method === 'POST' && $action === 'bulk-status') {
     $newStatus = $data['status'];
     $notes = $data['notes'] ?? '';
     
+    // Get orders before update
     $getStmt = $conn->prepare("SELECT id, status, order_number, user_id, merchant_id, driver_id FROM orders WHERE id IN ($placeholders)");
     $getStmt->execute($ids);
     $orders = $getStmt->fetchAll(PDO::FETCH_ASSOC);
     
+    // Update orders
     $updateStmt = $conn->prepare("UPDATE orders SET status = ?, updated_at = NOW() WHERE id IN ($placeholders)");
     $params = array_merge([$newStatus], $ids);
     $updateStmt->execute($params);
     $affected = $updateStmt->rowCount();
     
+    // Add status history for each order
     $historyStmt = $conn->prepare("
         INSERT INTO order_status_history (order_id, old_status, new_status, changed_by, changed_by_id, notes, created_at)
         VALUES (:order_id, :old_status, :new_status, 'admin', :admin_id, :notes, NOW())
@@ -989,7 +1283,7 @@ elseif ($method === 'POST' && $action === 'bulk-status') {
             ':notes' => $notes
         ]);
         
-        // Auto-send notification for each order
+        // Send notification for each order
         if ($order['status'] !== $newStatus) {
             autoSendOrderNotification($conn, $order['id'], $order['order_number'], $order['user_id'], $order['merchant_id'], $order['driver_id'], $order['status'], $newStatus, $notes);
         }
@@ -1000,9 +1294,8 @@ elseif ($method === 'POST' && $action === 'bulk-status') {
         'status' => $newStatus
     ], "$affected order(s) updated");
 }
-
 // =============================================
-// 6. UPDATE PAYMENT STATUS
+// 9. UPDATE PAYMENT STATUS
 // =============================================
 elseif ($method === 'PUT' && $orderId && $action === 'update-payment') {
     checkPermission('edit_orders', $auth, $db);
@@ -1011,6 +1304,11 @@ elseif ($method === 'PUT' && $orderId && $action === 'update-payment') {
     
     if (!isset($data['payment_status'])) {
         $db->sendError('payment_status is required', 400);
+    }
+    
+    $validStatuses = ['pending', 'paid', 'failed', 'refunded'];
+    if (!in_array($data['payment_status'], $validStatuses)) {
+        $db->sendError('Invalid payment status', 400);
     }
     
     $updateStmt = $conn->prepare("
@@ -1023,11 +1321,24 @@ elseif ($method === 'PUT' && $orderId && $action === 'update-payment') {
         ':id' => $orderId
     ]);
     
+    // Add note to history
+    $historyStmt = $conn->prepare("
+        INSERT INTO order_status_history (order_id, old_status, new_status, changed_by, changed_by_id, notes, created_at)
+        VALUES (:order_id, :old_status, :new_status, 'admin', :admin_id, :notes, NOW())
+    ");
+    $historyStmt->execute([
+        ':order_id' => $orderId,
+        ':old_status' => $data['current_status'] ?? '',
+        ':new_status' => $data['current_status'] ?? '',
+        ':admin_id' => $admin['id'],
+        ':notes' => "Payment status updated to: " . $data['payment_status']
+    ]);
+    
     $db->sendResponse([], 'Payment status updated successfully');
 }
 
 // =============================================
-// 7. ADD NOTE TO ORDER
+// 10. ADD NOTE TO ORDER
 // =============================================
 elseif ($method === 'POST' && $orderId && $action === 'add-note') {
     checkPermission('edit_orders', $auth, $db);
@@ -1038,6 +1349,19 @@ elseif ($method === 'POST' && $orderId && $action === 'add-note') {
         $db->sendError('Note is required', 400);
     }
     
+    // Add to order_notes table
+    $noteStmt = $conn->prepare("
+        INSERT INTO order_notes (order_id, admin_id, note, is_internal, created_at)
+        VALUES (:order_id, :admin_id, :note, :is_internal, NOW())
+    ");
+    $noteStmt->execute([
+        ':order_id' => $orderId,
+        ':admin_id' => $admin['id'],
+        ':note' => $data['note'],
+        ':is_internal' => $data['is_internal'] ?? 1
+    ]);
+    
+    // Also add to status history
     $historyStmt = $conn->prepare("
         INSERT INTO order_status_history (order_id, old_status, new_status, changed_by, changed_by_id, notes, created_at)
         VALUES (:order_id, :old_status, :new_status, 'admin', :admin_id, :notes, NOW())
@@ -1047,52 +1371,81 @@ elseif ($method === 'POST' && $orderId && $action === 'add-note') {
         ':old_status' => $data['current_status'] ?? '',
         ':new_status' => $data['current_status'] ?? '',
         ':admin_id' => $admin['id'],
-        ':notes' => $data['note']
+        ':notes' => "Note added: " . $data['note']
     ]);
     
     $db->sendResponse([], 'Note added successfully');
 }
-
 // =============================================
-// 8. GET ORDER STATISTICS
+// 11. GET ORDER STATISTICS
 // =============================================
 elseif ($method === 'GET' && $action === 'stats') {
     checkPermission('view_orders', $auth, $db);
     
     $stats = [];
     
+    // Today's orders
     $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE DATE(created_at) = CURDATE()");
     $stats['today_orders'] = intval($stmt->fetchColumn());
     
+    // Today's revenue
     $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE DATE(created_at) = CURDATE() AND status != 'cancelled'");
     $stats['today_revenue'] = floatval($stmt->fetchColumn());
+    $stats['formatted_today_revenue'] = formatCurrency($stats['today_revenue']);
     
+    // Pending orders
     $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status = 'pending'");
     $stats['pending_orders'] = intval($stmt->fetchColumn());
     
+    // Active orders (in progress)
     $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status IN ('confirmed', 'preparing', 'ready', 'out_for_delivery')");
     $stats['active_orders'] = intval($stmt->fetchColumn());
     
+    // Completed this month
     $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status = 'delivered' AND MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE())");
     $stats['completed_this_month'] = intval($stmt->fetchColumn());
     
+    // Cancelled this month
     $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status = 'cancelled' AND MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE())");
     $stats['cancelled_this_month'] = intval($stmt->fetchColumn());
     
+    // Average order value
     $stmt = $conn->query("SELECT COALESCE(AVG(total_amount), 0) FROM orders WHERE status NOT IN ('cancelled', 'rejected')");
     $stats['avg_order_value'] = floatval($stmt->fetchColumn());
+    $stats['formatted_avg_order_value'] = formatCurrency($stats['avg_order_value']);
     
+    // Total revenue all time
+    $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'delivered'");
+    $stats['total_revenue'] = floatval($stmt->fetchColumn());
+    $stats['formatted_total_revenue'] = formatCurrency($stats['total_revenue']);
+    
+    // Total orders all time
+    $stmt = $conn->query("SELECT COUNT(*) FROM orders");
+    $stats['total_orders'] = intval($stmt->fetchColumn());
+    
+    // Status breakdown
     $stmt = $conn->query("SELECT status, COUNT(*) as count FROM orders GROUP BY status");
     $stats['by_status'] = [];
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $stats['by_status'][$row['status']] = intval($row['count']);
     }
     
+    // Weekly orders (last 7 days)
+    $weeklyStmt = $conn->prepare("
+        SELECT DATE(created_at) as date, COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue
+        FROM orders 
+        WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+        GROUP BY DATE(created_at)
+        ORDER BY date ASC
+    ");
+    $weeklyStmt->execute();
+    $stats['weekly'] = $weeklyStmt->fetchAll(PDO::FETCH_ASSOC);
+    
     $db->sendResponse(['stats' => $stats]);
 }
 
 // =============================================
-// 9. GET RECENT ORDERS
+// 12. GET RECENT ORDERS
 // =============================================
 elseif ($method === 'GET' && $action === 'recent') {
     checkPermission('view_orders', $auth, $db);
@@ -1116,11 +1469,15 @@ elseif ($method === 'GET' && $action === 'recent') {
     $stmt->execute();
     $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
+    foreach ($orders as &$order) {
+        $order['formatted_total'] = formatCurrency($order['total_amount']);
+        $order['formatted_date'] = formatDate($order['created_at']);
+    }
+    
     $db->sendResponse(['orders' => $orders]);
 }
-
 // =============================================
-// 10. CANCEL ORDER
+// 13. CANCEL ORDER
 // =============================================
 elseif ($method === 'POST' && $orderId && $action === 'cancel') {
     checkPermission('edit_orders', $auth, $db);
@@ -1144,6 +1501,10 @@ elseif ($method === 'POST' && $orderId && $action === 'cancel') {
         $db->sendError('Cannot cancel a delivered order', 400);
     }
     
+    if ($order['status'] === 'cancelled') {
+        $db->sendError('Order is already cancelled', 400);
+    }
+    
     $updateStmt = $conn->prepare("
         UPDATE orders 
         SET status = 'cancelled', 
@@ -1156,6 +1517,7 @@ elseif ($method === 'POST' && $orderId && $action === 'cancel') {
         ':id' => $orderId
     ]);
     
+    // Add status history
     $historyStmt = $conn->prepare("
         INSERT INTO order_status_history (order_id, old_status, new_status, changed_by, changed_by_id, notes, created_at)
         VALUES (:order_id, :old_status, 'cancelled', 'admin', :admin_id, :notes, NOW())
@@ -1172,12 +1534,13 @@ elseif ($method === 'POST' && $orderId && $action === 'cancel') {
     
     $db->sendResponse([
         'order_id' => $orderId,
+        'order_number' => $order['order_number'],
         'cancelled' => true
     ], 'Order cancelled successfully');
 }
 
 // =============================================
-// 11. ASSIGN DRIVER TO ORDER
+// 14. ASSIGN DRIVER TO ORDER
 // =============================================
 elseif ($method === 'POST' && $action === 'assign-driver') {
     checkPermission('assign_drivers', $auth, $db);
@@ -1195,6 +1558,7 @@ elseif ($method === 'POST' && $action === 'assign-driver') {
     $orderId = intval($data['order_id']);
     $driverId = intval($data['driver_id']);
     
+    // Check order exists
     $checkOrder = $conn->prepare("
         SELECT o.id, o.status, o.driver_id, o.order_number, o.user_id, o.merchant_id
         FROM orders o
@@ -1207,7 +1571,8 @@ elseif ($method === 'POST' && $action === 'assign-driver') {
         $db->sendError('Order not found', 404);
     }
     
-    $checkDriver = $conn->prepare("SELECT id, full_name, is_active FROM drivers WHERE id = :id");
+    // Check driver exists and is active
+    $checkDriver = $conn->prepare("SELECT id, full_name, is_active, fcm_token FROM drivers WHERE id = :id");
     $checkDriver->execute([':id' => $driverId]);
     $driver = $checkDriver->fetch(PDO::FETCH_ASSOC);
     
@@ -1220,16 +1585,11 @@ elseif ($method === 'POST' && $action === 'assign-driver') {
     }
     
     $oldDriverId = $order['driver_id'];
-    $newStatus = $order['status'] == 'pending' ? 'confirmed' : $order['status'];
     
+    // Update order with driver
     $updateStmt = $conn->prepare("
         UPDATE orders 
-        SET driver_id = :driver_id, 
-            status = CASE 
-                WHEN status = 'pending' THEN 'confirmed' 
-                ELSE status 
-            END,
-            updated_at = NOW() 
+        SET driver_id = :driver_id, updated_at = NOW() 
         WHERE id = :order_id
     ");
     $updateStmt->execute([
@@ -1237,34 +1597,28 @@ elseif ($method === 'POST' && $action === 'assign-driver') {
         ':order_id' => $orderId
     ]);
     
+    // Add status history
     $historyStmt = $conn->prepare("
         INSERT INTO order_status_history (order_id, old_status, new_status, changed_by, changed_by_id, notes, created_at)
         VALUES (:order_id, :old_status, :new_status, 'admin', :admin_id, :notes, NOW())
     ");
     
-    $note = "Driver assigned: {$driver['full_name']}";
-    if ($oldDriverId) {
-        $note = "Driver changed from previous driver to {$driver['full_name']}";
-    }
+    $note = $oldDriverId ? "Driver changed from previous driver to {$driver['full_name']}" : "Driver assigned: {$driver['full_name']}";
     
     $historyStmt->execute([
         ':order_id' => $orderId,
         ':old_status' => $order['status'],
-        ':new_status' => $newStatus,
+        ':new_status' => $order['status'],
         ':admin_id' => $admin['id'],
         ':notes' => $note
     ]);
     
-    // Send driver assignment notification
-    $driverStmt = $conn->prepare("SELECT fcm_token FROM drivers WHERE id = :id");
-    $driverStmt->execute([':id' => $driverId]);
-    $driverData = $driverStmt->fetch(PDO::FETCH_ASSOC);
-    
-    if (!empty($driverData['fcm_token'])) {
+    // Send push notification to driver
+    if (!empty($driver['fcm_token'])) {
         sendPushNotification(
-            $driverData['fcm_token'],
+            $driver['fcm_token'],
             'New Delivery Assignment 🚚',
-            "You have been assigned to deliver order #{$order['order_number']}. Pick it up now!",
+            "You have been assigned to deliver order #{$order['order_number']}. Please check the app for details.",
             'delivery',
             ['order_id' => $orderId, 'order_number' => $order['order_number']]
         );
@@ -1278,7 +1632,7 @@ elseif ($method === 'POST' && $action === 'assign-driver') {
 }
 
 // =============================================
-// 12. GET AVAILABLE DRIVERS
+// 15. GET AVAILABLE DRIVERS
 // =============================================
 elseif ($method === 'GET' && $action === 'available-drivers') {
     checkPermission('view_drivers', $auth, $db);
@@ -1322,7 +1676,7 @@ elseif ($method === 'GET' && $action === 'available-drivers') {
 }
 
 // =============================================
-// 13. REMOVE DRIVER FROM ORDER
+// 16. REMOVE DRIVER FROM ORDER
 // =============================================
 elseif ($method === 'POST' && $action === 'remove-driver') {
     checkPermission('assign_drivers', $auth, $db);
@@ -1380,7 +1734,7 @@ elseif ($method === 'POST' && $action === 'remove-driver') {
         sendPushNotification(
             $order['fcm_token'],
             'Delivery Assignment Removed',
-            "Order #{$order['order_number']} has been reassigned. Reason: $reason",
+            "You have been unassigned from order #{$order['order_number']}. Reason: $reason",
             'delivery',
             ['order_id' => $orderId]
         );
@@ -1391,9 +1745,8 @@ elseif ($method === 'POST' && $action === 'remove-driver') {
         'removed_driver' => $order['driver_name']
     ], 'Driver removed from order successfully');
 }
-
 // =============================================
-// 14. BULK ASSIGN DRIVERS
+// 17. BULK ASSIGN DRIVERS
 // =============================================
 elseif ($method === 'POST' && $action === 'bulk-assign-drivers') {
     checkPermission('assign_drivers', $auth, $db);
@@ -1459,7 +1812,7 @@ elseif ($method === 'POST' && $action === 'bulk-assign-drivers') {
                     'New Delivery Assignment 🚚',
                     "You have been assigned to deliver order #{$order['order_number']}.",
                     'delivery',
-                    ['order_id' => $orderId]
+                    ['order_id' => $orderId, 'order_number' => $order['order_number']]
                 );
             }
             
@@ -1479,9 +1832,8 @@ elseif ($method === 'POST' && $action === 'bulk-assign-drivers') {
         'results' => $results
     ], "$successCount order(s) assigned successfully");
 }
-
 // =============================================
-// 15. DRIVER ORDER HISTORY
+// 18. DRIVER ORDER HISTORY
 // =============================================
 elseif ($method === 'GET' && $action === 'driver-history') {
     checkPermission('view_orders', $auth, $db);
@@ -1495,7 +1847,8 @@ elseif ($method === 'GET' && $action === 'driver-history') {
     $limit = isset($_GET['limit']) ? min(100, max(1, intval($_GET['limit']))) : 50;
     $offset = isset($_GET['page']) ? (max(1, intval($_GET['page'])) - 1) * $limit : 0;
     
-    $driverStmt = $conn->prepare("SELECT id, full_name, email, phone FROM drivers WHERE id = :id");
+    // Get driver info
+    $driverStmt = $conn->prepare("SELECT id, full_name, email, phone, vehicle_type, license_plate FROM drivers WHERE id = :id");
     $driverStmt->execute([':id' => $driverId]);
     $driver = $driverStmt->fetch(PDO::FETCH_ASSOC);
     
@@ -1503,10 +1856,12 @@ elseif ($method === 'GET' && $action === 'driver-history') {
         $db->sendError('Driver not found', 404);
     }
     
+    // Get order count
     $countStmt = $conn->prepare("SELECT COUNT(*) as total FROM orders WHERE driver_id = :driver_id");
     $countStmt->execute([':driver_id' => $driverId]);
     $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
     
+    // Get orders
     $ordersStmt = $conn->prepare("
         SELECT 
             o.id, o.order_number, o.status, o.total_amount, o.delivery_address,
@@ -1526,6 +1881,12 @@ elseif ($method === 'GET' && $action === 'driver-history') {
     $ordersStmt->execute();
     $orders = $ordersStmt->fetchAll(PDO::FETCH_ASSOC);
     
+    foreach ($orders as &$order) {
+        $order['formatted_total'] = formatCurrency($order['total_amount']);
+        $order['formatted_date'] = formatDate($order['created_at']);
+    }
+    
+    // Get statistics
     $statsStmt = $conn->prepare("
         SELECT 
             COUNT(*) as total_orders,
@@ -1538,6 +1899,7 @@ elseif ($method === 'GET' && $action === 'driver-history') {
     ");
     $statsStmt->execute([':driver_id' => $driverId]);
     $stats = $statsStmt->fetch(PDO::FETCH_ASSOC);
+    $stats['formatted_total_delivered_value'] = formatCurrency($stats['total_delivered_value']);
     
     $db->sendResponse([
         'driver' => $driver,
@@ -1553,16 +1915,16 @@ elseif ($method === 'GET' && $action === 'driver-history') {
 }
 
 // =============================================
-// 16. DELIVERY STATUS TRACKING
+// 19. DELIVERY STATUS TRACKING
 // =============================================
 elseif ($method === 'GET' && $action === 'tracking' && $orderId) {
     checkPermission('view_orders', $auth, $db);
     
     $stmt = $conn->prepare("
         SELECT 
-            o.id, o.order_number, o.status, o.delivery_address,
-            o.created_at, o.updated_at,
-            d.id as driver_id, d.full_name as driver_name, d.phone as driver_phone,
+            o.id, o.order_number, o.status, o.delivery_address, o.delivery_latitude, o.delivery_longitude,
+            o.created_at, o.updated_at, o.estimated_delivery_time,
+            d.id as driver_id, d.full_name as driver_name, d.phone as driver_phone, d.vehicle_type, d.license_plate,
             dl.latitude, dl.longitude, dl.location_updated_at
         FROM orders o
         LEFT JOIN drivers d ON o.driver_id = d.id
@@ -1576,18 +1938,18 @@ elseif ($method === 'GET' && $action === 'tracking' && $orderId) {
         $db->sendError('Order not found', 404);
     }
     
+    // Get timeline
     $timelineStmt = $conn->prepare("
         SELECT old_status, new_status, notes, created_at, changed_by, changed_by_id
         FROM order_status_history
         WHERE order_id = :order_id
-        ORDER BY created_at DESC
+        ORDER BY created_at ASC
     ");
     $timelineStmt->execute([':order_id' => $orderId]);
     $timeline = $timelineStmt->fetchAll(PDO::FETCH_ASSOC);
     
-    $estimatedDelivery = null;
-    if ($tracking['created_at']) {
-        $estimatedDelivery = date('Y-m-d H:i:s', strtotime($tracking['created_at'] . ' +45 minutes'));
+    foreach ($timeline as &$t) {
+        $t['formatted_date'] = formatDate($t['created_at']);
     }
     
     $db->sendResponse([
@@ -1595,13 +1957,19 @@ elseif ($method === 'GET' && $action === 'tracking' && $orderId) {
             'id' => $tracking['order_number'],
             'status' => $tracking['status'],
             'delivery_address' => $tracking['delivery_address'],
+            'delivery_latitude' => $tracking['delivery_latitude'] ? floatval($tracking['delivery_latitude']) : null,
+            'delivery_longitude' => $tracking['delivery_longitude'] ? floatval($tracking['delivery_longitude']) : null,
             'created_at' => $tracking['created_at'],
-            'estimated_delivery' => $estimatedDelivery
+            'formatted_created' => formatDate($tracking['created_at']),
+            'estimated_delivery_time' => $tracking['estimated_delivery_time'],
+            'formatted_estimated' => $tracking['estimated_delivery_time'] ? formatDate($tracking['estimated_delivery_time']) : null
         ],
         'driver' => $tracking['driver_id'] ? [
             'id' => $tracking['driver_id'],
             'name' => $tracking['driver_name'],
             'phone' => $tracking['driver_phone'],
+            'vehicle_type' => $tracking['vehicle_type'],
+            'license_plate' => $tracking['license_plate'],
             'current_location' => [
                 'lat' => $tracking['latitude'] ? floatval($tracking['latitude']) : null,
                 'lng' => $tracking['longitude'] ? floatval($tracking['longitude']) : null,
@@ -1611,9 +1979,8 @@ elseif ($method === 'GET' && $action === 'tracking' && $orderId) {
         'timeline' => $timeline
     ]);
 }
-
 // =============================================
-// 17. UPDATE ORDER (FULL UPDATE)
+// 20. UPDATE ORDER (FULL UPDATE)
 // =============================================
 elseif ($method === 'PUT' && $orderId && $action === 'update') {
     checkPermission('edit_orders', $auth, $db);
@@ -1629,7 +1996,6 @@ elseif ($method === 'PUT' && $orderId && $action === 'update') {
         $db->sendError('Order not found', 404);
     }
     
-    // Start transaction
     $conn->beginTransaction();
     
     try {
@@ -1638,9 +2004,10 @@ elseif ($method === 'PUT' && $orderId && $action === 'update') {
         
         // Basic order fields that can be updated
         $updatableFields = [
-            'user_id', 'merchant_id', 'status', 'delivery_fee', 
+            'user_id', 'merchant_id', 'status', 'delivery_fee', 'tip_amount',
             'discount_amount', 'payment_method', 'payment_status',
-            'delivery_address', 'special_instructions', 'driver_id'
+            'delivery_address', 'delivery_latitude', 'delivery_longitude', 
+            'special_instructions', 'driver_id'
         ];
         
         foreach ($updatableFields as $field) {
@@ -1659,17 +2026,17 @@ elseif ($method === 'PUT' && $orderId && $action === 'update') {
             $itemsData = [];
             
             foreach ($data['items'] as $item) {
-                if (empty($item['name']) || empty($item['price']) || empty($item['quantity'])) {
+                if (empty($item['name']) || !isset($item['price']) || empty($item['quantity'])) {
                     throw new Exception('Each item must have name, price, and quantity');
                 }
                 
-                $itemTotal = $item['price'] * $item['quantity'];
+                $itemTotal = floatval($item['price']) * intval($item['quantity']);
                 $addOnsTotal = 0;
                 $addOnsJson = null;
                 
                 if (!empty($item['add_ons']) && is_array($item['add_ons'])) {
                     foreach ($item['add_ons'] as $addon) {
-                        $addOnsTotal += ($addon['price'] ?? 0) * ($addon['quantity'] ?? 1);
+                        $addOnsTotal += (floatval($addon['price'] ?? 0)) * (intval($addon['quantity'] ?? 1));
                     }
                     $addOnsJson = json_encode($item['add_ons']);
                 }
@@ -1680,8 +2047,8 @@ elseif ($method === 'PUT' && $orderId && $action === 'update') {
                 $itemsData[] = [
                     'id' => $item['id'] ?? null,
                     'name' => $item['name'],
-                    'price' => $item['price'],
-                    'quantity' => $item['quantity'],
+                    'price' => floatval($item['price']),
+                    'quantity' => intval($item['quantity']),
                     'add_ons_json' => $addOnsJson,
                     'special_instructions' => $item['special_instructions'] ?? null,
                     'total' => $itemFinalTotal
@@ -1689,8 +2056,9 @@ elseif ($method === 'PUT' && $orderId && $action === 'update') {
             }
             
             $deliveryFee = $data['delivery_fee'] ?? ($order['delivery_fee'] ?? 0);
+            $tipAmount = $data['tip_amount'] ?? ($order['tip_amount'] ?? 0);
             $discountAmount = $data['discount_amount'] ?? ($order['discount_amount'] ?? 0);
-            $totalAmount = $subtotal + $deliveryFee - $discountAmount;
+            $totalAmount = $subtotal + $deliveryFee + $tipAmount - $discountAmount;
             
             $updateFields[] = "subtotal = :subtotal";
             $updateFields[] = "total_amount = :total_amount";
@@ -1717,9 +2085,9 @@ elseif ($method === 'PUT' && $orderId && $action === 'update') {
             // Insert/update items
             $itemStmt = $conn->prepare("
                 INSERT INTO order_items (
-                    order_id, name, price, quantity, add_ons_json, special_instructions, total
+                    order_id, item_name, price, quantity, add_ons_json, special_instructions, total
                 ) VALUES (
-                    :order_id, :name, :price, :quantity, :add_ons_json, :special_instructions, :total
+                    :order_id, :item_name, :price, :quantity, :add_ons_json, :special_instructions, :total
                 )
             ");
             
@@ -1727,7 +2095,7 @@ elseif ($method === 'PUT' && $orderId && $action === 'update') {
                 if (isset($item['id']) && !isset($data['replace_items'])) {
                     $updateItemStmt = $conn->prepare("
                         UPDATE order_items 
-                        SET name = :name, price = :price, quantity = :quantity, 
+                        SET item_name = :item_name, price = :price, quantity = :quantity, 
                             add_ons_json = :add_ons_json, special_instructions = :special_instructions, 
                             total = :total
                         WHERE id = :id AND order_id = :order_id
@@ -1735,7 +2103,7 @@ elseif ($method === 'PUT' && $orderId && $action === 'update') {
                     $updateItemStmt->execute([
                         ':id' => $item['id'],
                         ':order_id' => $orderId,
-                        ':name' => $item['name'],
+                        ':item_name' => $item['name'],
                         ':price' => $item['price'],
                         ':quantity' => $item['quantity'],
                         ':add_ons_json' => $item['add_ons_json'],
@@ -1745,7 +2113,7 @@ elseif ($method === 'PUT' && $orderId && $action === 'update') {
                 } else {
                     $itemStmt->execute([
                         ':order_id' => $orderId,
-                        ':name' => $item['name'],
+                        ':item_name' => $item['name'],
                         ':price' => $item['price'],
                         ':quantity' => $item['quantity'],
                         ':add_ons_json' => $item['add_ons_json'],
@@ -1775,7 +2143,7 @@ elseif ($method === 'PUT' && $orderId && $action === 'update') {
             ]);
             
             // Auto-send notification if status changed
-            autoSendOrderNotification($conn, $orderId, $order['order_number'], $order['user_id'], $order['merchant_id'], $data['driver_id'] ?? null, $order['status'], $data['status']);
+            autoSendOrderNotification($conn, $orderId, $order['order_number'], $order['user_id'], $order['merchant_id'], $data['driver_id'] ?? null, $order['status'], $data['status'], $data['update_note'] ?? '');
         }
         
         $conn->commit();
@@ -1792,7 +2160,7 @@ elseif ($method === 'PUT' && $orderId && $action === 'update') {
 }
 
 // =============================================
-// 18. DELETE ORDER
+// 21. DELETE ORDER
 // =============================================
 elseif ($method === 'DELETE' && $orderId && $action === 'delete') {
     checkPermission('delete_orders', $auth, $db);
@@ -1808,7 +2176,7 @@ elseif ($method === 'DELETE' && $orderId && $action === 'delete') {
         $db->sendError('Order not found', 404);
     }
     
-    // Optional: Add confirmation for deleting completed/delivered orders
+    // Check if force delete is enabled
     $force = isset($_GET['force']) ? $_GET['force'] === 'true' : false;
     
     if (in_array($order['status'], ['delivered', 'completed']) && !$force) {
@@ -1818,17 +2186,20 @@ elseif ($method === 'DELETE' && $orderId && $action === 'delete') {
         );
     }
     
-    // Start transaction
     $conn->beginTransaction();
     
     try {
-        // Delete order items first (foreign key constraint)
+        // Delete order items
         $deleteItemsStmt = $conn->prepare("DELETE FROM order_items WHERE order_id = :order_id");
         $deleteItemsStmt->execute([':order_id' => $orderId]);
         
         // Delete status history
         $deleteHistoryStmt = $conn->prepare("DELETE FROM order_status_history WHERE order_id = :order_id");
         $deleteHistoryStmt->execute([':order_id' => $orderId]);
+        
+        // Delete order notes
+        $deleteNotesStmt = $conn->prepare("DELETE FROM order_notes WHERE order_id = :order_id");
+        $deleteNotesStmt->execute([':order_id' => $orderId]);
         
         // Delete the order
         $deleteOrderStmt = $conn->prepare("DELETE FROM orders WHERE id = :id");
@@ -1849,7 +2220,7 @@ elseif ($method === 'DELETE' && $orderId && $action === 'delete') {
 }
 
 // =============================================
-// 19. BULK DELETE ORDERS
+// 22. BULK DELETE ORDERS
 // =============================================
 elseif ($method === 'POST' && $action === 'bulk-delete') {
     checkPermission('delete_orders', $auth, $db);
@@ -1886,7 +2257,6 @@ elseif ($method === 'POST' && $action === 'bulk-delete') {
         $db->sendError('No orders to delete. All selected orders are delivered/completed.', 400);
     }
     
-    // Start transaction
     $conn->beginTransaction();
     
     try {
@@ -1899,6 +2269,10 @@ elseif ($method === 'POST' && $action === 'bulk-delete') {
         // Delete status history
         $deleteHistoryStmt = $conn->prepare("DELETE FROM order_status_history WHERE order_id IN ($deletePlaceholders)");
         $deleteHistoryStmt->execute($toDelete);
+        
+        // Delete order notes
+        $deleteNotesStmt = $conn->prepare("DELETE FROM order_notes WHERE order_id IN ($deletePlaceholders)");
+        $deleteNotesStmt->execute($toDelete);
         
         // Delete orders
         $deleteOrdersStmt = $conn->prepare("DELETE FROM orders WHERE id IN ($deletePlaceholders)");
@@ -1928,7 +2302,7 @@ elseif ($method === 'POST' && $action === 'bulk-delete') {
 }
 
 // =============================================
-// 20. EXPORT ORDERS
+// 23. EXPORT ORDERS
 // =============================================
 elseif ($method === 'GET' && $action === 'export') {
     checkPermission('export_orders', $auth, $db);
@@ -1936,6 +2310,7 @@ elseif ($method === 'GET' && $action === 'export') {
     $search = isset($_GET['search']) ? trim($_GET['search']) : '';
     $status = isset($_GET['status']) ? $_GET['status'] : '';
     $merchantId = isset($_GET['merchant_id']) ? intval($_GET['merchant_id']) : null;
+    $customerId = isset($_GET['customer_id']) ? intval($_GET['customer_id']) : null;
     $dateFrom = isset($_GET['date_from']) ? $_GET['date_from'] : '';
     $dateTo = isset($_GET['date_to']) ? $_GET['date_to'] : '';
     $format = isset($_GET['format']) ? strtolower($_GET['format']) : 'csv';
@@ -1959,6 +2334,11 @@ elseif ($method === 'GET' && $action === 'export') {
         $params[':merchant_id'] = $merchantId;
     }
     
+    if ($customerId) {
+        $where[] = "o.user_id = :customer_id";
+        $params[':customer_id'] = $customerId;
+    }
+    
     if ($dateFrom) {
         $where[] = "DATE(o.created_at) >= :date_from";
         $params[':date_from'] = $dateFrom;
@@ -1972,7 +2352,7 @@ elseif ($method === 'GET' && $action === 'export') {
     $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
     
     $sql = "SELECT 
-                o.order_number, o.status, o.subtotal, o.delivery_fee, 
+                o.order_number, o.status, o.subtotal, o.delivery_fee, o.tip_amount,
                 o.discount_amount, o.total_amount, o.payment_method, o.payment_status,
                 o.delivery_address, o.special_instructions, o.cancellation_reason,
                 o.created_at, o.updated_at,
@@ -1999,7 +2379,7 @@ elseif ($method === 'GET' && $action === 'export') {
         $orderNumbers = array_column($orders, 'order_number');
         $placeholders = implode(',', array_fill(0, count($orderNumbers), '?'));
         $itemsSql = "
-            SELECT o.order_number, oi.name as item_name, oi.quantity, oi.price as unit_price, oi.total as item_total
+            SELECT o.order_number, oi.item_name, oi.quantity, oi.price as unit_price, oi.total as item_total
             FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
             WHERE o.order_number IN ($placeholders)
@@ -2013,45 +2393,69 @@ elseif ($method === 'GET' && $action === 'export') {
         }
     }
     
-    // CSV Export (default)
+    // Clear output buffers
     while (ob_get_level()) ob_end_clean();
     
+    // CSV Export
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename="orders_export_' . date('Y-m-d_His') . '.csv"');
     
     $output = fopen('php://output', 'w');
-    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
+    fprintf($output, chr(0xEF) . chr(0xBB) . chr(0xBF)); // UTF-8 BOM
     
     if ($includeItems) {
-        fputcsv($output, ['Order #', 'Status', 'Customer', 'Merchant', 'Driver', 'Item', 'Qty', 'Price', 'Subtotal', 'Delivery Fee', 'Total', 'Payment Method', 'Delivery Address', 'Created At']);
+        fputcsv($output, ['Order #', 'Status', 'Customer', 'Merchant', 'Driver', 'Item', 'Qty', 'Unit Price', 'Item Total', 'Subtotal', 'Delivery Fee', 'Tip', 'Discount', 'Grand Total', 'Payment Method', 'Delivery Address', 'Created At']);
         foreach ($orders as $order) {
             if (isset($orderItems[$order['order_number']]) && !empty($orderItems[$order['order_number']])) {
+                $firstItem = true;
                 foreach ($orderItems[$order['order_number']] as $item) {
                     fputcsv($output, [
-                        $order['order_number'], $order['status'], $order['customer_name'], $order['merchant_name'],
-                        $order['driver_name'] ?? 'Unassigned', $item['item_name'], $item['quantity'],
-                        number_format($item['unit_price'], 2), number_format($order['subtotal'], 2),
-                        number_format($order['delivery_fee'], 2), number_format($order['total_amount'], 2),
-                        $order['payment_method'], $order['delivery_address'], $order['created_at']
+                        $order['order_number'],
+                        $order['status'],
+                        $order['customer_name'],
+                        $order['merchant_name'],
+                        $order['driver_name'] ?? 'Unassigned',
+                        $item['item_name'],
+                        $item['quantity'],
+                        number_format($item['unit_price'], 2),
+                        number_format($item['item_total'], 2),
+                        $firstItem ? number_format($order['subtotal'], 2) : '',
+                        $firstItem ? number_format($order['delivery_fee'], 2) : '',
+                        $firstItem ? number_format($order['tip_amount'], 2) : '',
+                        $firstItem ? number_format($order['discount_amount'], 2) : '',
+                        $firstItem ? number_format($order['total_amount'], 2) : '',
+                        $firstItem ? $order['payment_method'] : '',
+                        $firstItem ? $order['delivery_address'] : '',
+                        $firstItem ? $order['created_at'] : ''
                     ]);
+                    $firstItem = false;
                 }
             } else {
                 fputcsv($output, [
-                    $order['order_number'], $order['status'], $order['customer_name'], $order['merchant_name'],
-                    $order['driver_name'] ?? 'Unassigned', 'N/A', '0', '0', number_format($order['subtotal'], 2),
-                    number_format($order['delivery_fee'], 2), number_format($order['total_amount'], 2),
+                    $order['order_number'], $order['status'], $order['customer_name'],
+                    $order['merchant_name'], $order['driver_name'] ?? 'Unassigned',
+                    'N/A', '0', '0', '0',
+                    number_format($order['subtotal'], 2),
+                    number_format($order['delivery_fee'], 2),
+                    number_format($order['tip_amount'], 2),
+                    number_format($order['discount_amount'], 2),
+                    number_format($order['total_amount'], 2),
                     $order['payment_method'], $order['delivery_address'], $order['created_at']
                 ]);
             }
         }
     } else {
-        fputcsv($output, ['Order #', 'Status', 'Customer', 'Email', 'Phone', 'Merchant', 'Driver', 'Subtotal', 'Delivery Fee', 'Discount', 'Total', 'Payment Method', 'Delivery Address', 'Created At']);
+        fputcsv($output, ['Order #', 'Status', 'Customer', 'Email', 'Phone', 'Merchant', 'Driver', 'Subtotal', 'Delivery Fee', 'Tip', 'Discount', 'Total', 'Payment Method', 'Delivery Address', 'Created At']);
         foreach ($orders as $order) {
             fputcsv($output, [
-                $order['order_number'], $order['status'], $order['customer_name'], $order['customer_email'],
-                $order['customer_phone'], $order['merchant_name'], $order['driver_name'] ?? 'Unassigned',
-                number_format($order['subtotal'], 2), number_format($order['delivery_fee'], 2),
-                number_format($order['discount_amount'], 2), number_format($order['total_amount'], 2),
+                $order['order_number'], $order['status'], $order['customer_name'],
+                $order['customer_email'], $order['customer_phone'],
+                $order['merchant_name'], $order['driver_name'] ?? 'Unassigned',
+                number_format($order['subtotal'], 2),
+                number_format($order['delivery_fee'], 2),
+                number_format($order['tip_amount'], 2),
+                number_format($order['discount_amount'], 2),
+                number_format($order['total_amount'], 2),
                 $order['payment_method'], $order['delivery_address'], $order['created_at']
             ]);
         }
