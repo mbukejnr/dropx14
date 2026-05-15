@@ -59,7 +59,7 @@ $baseUrl = "https://dropx14-production.up.railway.app";
 // =============================================
 // CREATE UPLOAD DIRECTORIES
 // =============================================
-$uploadBaseDir = __DIR__ . '/../../uploads/';
+$uploadBaseDir = __DIR__ . '/../uploads/';
 $uploadDirs = [
     'menu_items' => $uploadBaseDir . 'menu_items/',
     'merchants' => $uploadBaseDir . 'merchants/',
