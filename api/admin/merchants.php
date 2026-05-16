@@ -125,7 +125,7 @@ function handleImageUpload($file, $type) {
         return ['success' => false, 'error' => 'Invalid file type. Only JPEG, PNG, GIF, WEBP allowed.'];
     }
     
-    if ($file['size'] > 5 * 1024 * 1024) {
+    if ($file['size'] > 10 * 1024 * 1024) {
         return ['success' => false, 'error' => 'File too large. Max 5MB allowed.'];
     }
     
