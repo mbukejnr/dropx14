@@ -1,6 +1,6 @@
 <?php
 // backend/api/admin/admin_orders.php
-// COMPLETE ORDER MANAGEMENT SYSTEM
+// COMPLETE ORDER MANAGEMENT SYSTEM WITH DELIVERY FEE CALCULATION
 
 // =============================================
 // CORS HEADERS
@@ -32,7 +32,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
-
 
 // =============================================
 // REQUIRE AUTH FILES
@@ -76,7 +75,15 @@ function formatDate($dateString) {
 }
 
 function generateOrderNumber() {
-    return 'ORD-' . strtoupper(uniqid()) . '-' . date('YmdHis');
+    // Generate short 6-character order number
+    $characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    $orderNumber = '';
+    for ($i = 0; $i < 6; $i++) {
+        $orderNumber .= $characters[rand(0, strlen($characters) - 1)];
+    }
+    
+    // Add prefix and check uniqueness (will handle duplicate in database)
+    return 'ORD' . $orderNumber;
 }
 
 // =============================================
@@ -357,7 +364,6 @@ try {
             $params[':search'] = "%$search%";
         }
         
-        // 🔥 FIXED: Only add WHERE if there are conditions
         $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
         
         $sql = "SELECT 
@@ -436,7 +442,6 @@ try {
     elseif ($method === 'GET' && $action === 'available-drivers') {
         checkPermission('view_drivers', $auth, $db);
         
-        // Check if is_available column exists
         try {
             $checkColumn = $conn->query("SHOW COLUMNS FROM drivers LIKE 'is_available'");
             $hasIsAvailable = $checkColumn->rowCount() > 0;
@@ -498,9 +503,8 @@ try {
         
         $data = json_decode(file_get_contents('php://input'), true);
         
-        // Validation
         if (empty($data['user_id'])) {
-            echo json_encode(['success' => false, 'message' => 'Customer is required. Please select a customer.']);
+            echo json_encode(['success' => false, 'message' => 'Customer is required']);
             exit();
         }
         
@@ -509,7 +513,7 @@ try {
         $customer = $customerCheck->fetch(PDO::FETCH_ASSOC);
         
         if (!$customer) {
-            echo json_encode(['success' => false, 'message' => 'Invalid customer selected. Customer not found.']);
+            echo json_encode(['success' => false, 'message' => 'Customer not found']);
             exit();
         }
         
@@ -564,7 +568,16 @@ try {
             $discountAmount = isset($data['discount_amount']) ? floatval($data['discount_amount']) : 0;
             $tipAmount = isset($data['tip_amount']) ? floatval($data['tip_amount']) : 0;
             $totalAmount = $subtotal + $deliveryFee + $tipAmount - $discountAmount;
+            
+            // Generate unique order number
             $orderNumber = generateOrderNumber();
+            $checkStmt = $conn->prepare("SELECT id FROM orders WHERE order_number = :num");
+            $checkStmt->execute([':num' => $orderNumber]);
+            while ($checkStmt->fetch()) {
+                $orderNumber = generateOrderNumber();
+                $checkStmt->execute([':num' => $orderNumber]);
+            }
+            
             $initialStatus = $data['status'] ?? 'pending';
             
             $orderStmt = $conn->prepare("
@@ -602,7 +615,6 @@ try {
             
             $newOrderId = $conn->lastInsertId();
             
-            // Insert order items
             if (!empty($itemsData)) {
                 $itemStmt = $conn->prepare("
                     INSERT INTO order_items (
@@ -664,7 +676,7 @@ try {
                 ':order_id' => $newOrderId,
                 ':new_status' => $initialStatus,
                 ':admin_id' => $admin['id'],
-                ':notes' => 'Order created by admin for customer: ' . $customer['full_name']
+                ':notes' => 'Order created by admin for: ' . $customer['full_name']
             ]);
             
             $conn->commit();
@@ -704,9 +716,7 @@ try {
         $newStatus = $data['status'];
         $notes = $data['notes'] ?? '';
         
-        $checkStmt = $conn->prepare("
-            SELECT id, status, order_number, user_id, merchant_id, driver_id FROM orders WHERE id = :id
-        ");
+        $checkStmt = $conn->prepare("SELECT id, status, order_number FROM orders WHERE id = :id");
         $checkStmt->execute([':id' => $orderId]);
         $order = $checkStmt->fetch(PDO::FETCH_ASSOC);
         
@@ -717,17 +727,9 @@ try {
         
         $oldStatus = $order['status'];
         
-        $updateStmt = $conn->prepare("
-            UPDATE orders 
-            SET status = :status, updated_at = NOW() 
-            WHERE id = :id
-        ");
-        $updateStmt->execute([
-            ':status' => $newStatus,
-            ':id' => $orderId
-        ]);
+        $updateStmt = $conn->prepare("UPDATE orders SET status = :status, updated_at = NOW() WHERE id = :id");
+        $updateStmt->execute([':status' => $newStatus, ':id' => $orderId]);
         
-        // Add status history
         $historyStmt = $conn->prepare("
             INSERT INTO order_status_history (order_id, old_status, new_status, changed_by, changed_by_id, notes, created_at)
             VALUES (:order_id, :old_status, :new_status, 'admin', :admin_id, :notes, NOW())
@@ -742,12 +744,8 @@ try {
         
         echo json_encode([
             'success' => true,
-            'message' => 'Order status updated successfully',
-            'data' => [
-                'order_id' => $orderId,
-                'old_status' => $oldStatus,
-                'new_status' => $newStatus
-            ]
+            'message' => 'Order status updated',
+            'data' => ['order_id' => $orderId, 'old_status' => $oldStatus, 'new_status' => $newStatus]
         ]);
         exit();
     }
@@ -760,25 +758,15 @@ try {
         
         $data = json_decode(file_get_contents('php://input'), true);
         
-        if (empty($data['order_id'])) {
-            echo json_encode(['success' => false, 'message' => 'order_id is required']);
-            exit();
-        }
-        
-        if (empty($data['driver_id'])) {
-            echo json_encode(['success' => false, 'message' => 'driver_id is required']);
+        if (empty($data['order_id']) || empty($data['driver_id'])) {
+            echo json_encode(['success' => false, 'message' => 'order_id and driver_id are required']);
             exit();
         }
         
         $orderId = intval($data['order_id']);
         $driverId = intval($data['driver_id']);
         
-        // Check order exists
-        $checkOrder = $conn->prepare("
-            SELECT id, status, driver_id, order_number, user_id, merchant_id
-            FROM orders o
-            WHERE o.id = :id
-        ");
+        $checkOrder = $conn->prepare("SELECT id, status, driver_id FROM orders WHERE id = :id");
         $checkOrder->execute([':id' => $orderId]);
         $order = $checkOrder->fetch(PDO::FETCH_ASSOC);
         
@@ -787,42 +775,25 @@ try {
             exit();
         }
         
-        // Check driver exists and is active
         $checkDriver = $conn->prepare("SELECT id, full_name, is_active FROM drivers WHERE id = :id");
         $checkDriver->execute([':id' => $driverId]);
         $driver = $checkDriver->fetch(PDO::FETCH_ASSOC);
         
-        if (!$driver) {
-            echo json_encode(['success' => false, 'message' => 'Driver not found']);
-            exit();
-        }
-        
-        if (!$driver['is_active']) {
-            echo json_encode(['success' => false, 'message' => 'Driver is not active']);
+        if (!$driver || !$driver['is_active']) {
+            echo json_encode(['success' => false, 'message' => 'Driver not found or inactive']);
             exit();
         }
         
         $oldDriverId = $order['driver_id'];
         
-        // Update order with driver
-        $updateStmt = $conn->prepare("
-            UPDATE orders 
-            SET driver_id = :driver_id, updated_at = NOW() 
-            WHERE id = :order_id
-        ");
-        $updateStmt->execute([
-            ':driver_id' => $driverId,
-            ':order_id' => $orderId
-        ]);
+        $updateStmt = $conn->prepare("UPDATE orders SET driver_id = :driver_id, updated_at = NOW() WHERE id = :order_id");
+        $updateStmt->execute([':driver_id' => $driverId, ':order_id' => $orderId]);
         
-        // Add status history
+        $note = $oldDriverId ? "Driver changed to {$driver['full_name']}" : "Driver assigned: {$driver['full_name']}";
         $historyStmt = $conn->prepare("
             INSERT INTO order_status_history (order_id, old_status, new_status, changed_by, changed_by_id, notes, created_at)
             VALUES (:order_id, :old_status, :new_status, 'admin', :admin_id, :notes, NOW())
         ");
-        
-        $note = $oldDriverId ? "Driver changed from previous driver to {$driver['full_name']}" : "Driver assigned: {$driver['full_name']}";
-        
         $historyStmt->execute([
             ':order_id' => $orderId,
             ':old_status' => $order['status'],
@@ -833,12 +804,8 @@ try {
         
         echo json_encode([
             'success' => true,
-            'message' => 'Driver assigned successfully',
-            'data' => [
-                'order_id' => $orderId,
-                'driver_id' => $driverId,
-                'driver_name' => $driver['full_name']
-            ]
+            'message' => 'Driver assigned',
+            'data' => ['driver_name' => $driver['full_name']]
         ]);
         exit();
     }
@@ -860,7 +827,7 @@ try {
         $reason = $data['reason'] ?? 'Removed by admin';
         
         $checkOrder = $conn->prepare("
-            SELECT o.id, o.status, o.driver_id, o.order_number, d.full_name as driver_name
+            SELECT o.id, o.status, o.driver_id, d.full_name as driver_name
             FROM orders o
             LEFT JOIN drivers d ON o.driver_id = d.id
             WHERE o.id = :id
@@ -868,46 +835,27 @@ try {
         $checkOrder->execute([':id' => $orderId]);
         $order = $checkOrder->fetch(PDO::FETCH_ASSOC);
         
-        if (!$order) {
-            echo json_encode(['success' => false, 'message' => 'Order not found']);
+        if (!$order || !$order['driver_id']) {
+            echo json_encode(['success' => false, 'message' => 'No driver assigned']);
             exit();
         }
         
-        if (!$order['driver_id']) {
-            echo json_encode(['success' => false, 'message' => 'No driver assigned to this order']);
-            exit();
-        }
-        
-        $updateStmt = $conn->prepare("
-            UPDATE orders 
-            SET driver_id = NULL, updated_at = NOW() 
-            WHERE id = :order_id
-        ");
+        $updateStmt = $conn->prepare("UPDATE orders SET driver_id = NULL, updated_at = NOW() WHERE id = :order_id");
         $updateStmt->execute([':order_id' => $orderId]);
         
         $historyStmt = $conn->prepare("
             INSERT INTO order_status_history (order_id, old_status, new_status, changed_by, changed_by_id, notes, created_at)
             VALUES (:order_id, :old_status, :new_status, 'admin', :admin_id, :notes, NOW())
         ");
-        
-        $note = "Driver removed: {$order['driver_name']}. Reason: $reason";
-        
         $historyStmt->execute([
             ':order_id' => $orderId,
             ':old_status' => $order['status'],
             ':new_status' => $order['status'],
             ':admin_id' => $admin['id'],
-            ':notes' => $note
+            ':notes' => "Driver removed: {$order['driver_name']}. Reason: $reason"
         ]);
         
-        echo json_encode([
-            'success' => true,
-            'message' => 'Driver removed from order successfully',
-            'data' => [
-                'order_id' => $orderId,
-                'removed_driver' => $order['driver_name']
-            ]
-        ]);
+        echo json_encode(['success' => true, 'message' => 'Driver removed']);
         exit();
     }
     
@@ -920,9 +868,7 @@ try {
         $data = json_decode(file_get_contents('php://input'), true);
         $reason = $data['reason'] ?? 'Cancelled by admin';
         
-        $checkStmt = $conn->prepare("
-            SELECT id, status, order_number, user_id, merchant_id, driver_id FROM orders WHERE id = :id
-        ");
+        $checkStmt = $conn->prepare("SELECT id, status, order_number FROM orders WHERE id = :id");
         $checkStmt->execute([':id' => $orderId]);
         $order = $checkStmt->fetch(PDO::FETCH_ASSOC);
         
@@ -932,28 +878,18 @@ try {
         }
         
         if ($order['status'] === 'delivered') {
-            echo json_encode(['success' => false, 'message' => 'Cannot cancel a delivered order']);
+            echo json_encode(['success' => false, 'message' => 'Cannot cancel delivered order']);
             exit();
         }
         
         if ($order['status'] === 'cancelled') {
-            echo json_encode(['success' => false, 'message' => 'Order is already cancelled']);
+            echo json_encode(['success' => false, 'message' => 'Order already cancelled']);
             exit();
         }
         
-        $updateStmt = $conn->prepare("
-            UPDATE orders 
-            SET status = 'cancelled', 
-                cancellation_reason = :reason, 
-                updated_at = NOW() 
-            WHERE id = :id
-        ");
-        $updateStmt->execute([
-            ':reason' => $reason . ' (Admin: ' . $admin['full_name'] . ')',
-            ':id' => $orderId
-        ]);
+        $updateStmt = $conn->prepare("UPDATE orders SET status = 'cancelled', cancellation_reason = :reason, updated_at = NOW() WHERE id = :id");
+        $updateStmt->execute([':reason' => $reason . ' (Admin: ' . $admin['full_name'] . ')', ':id' => $orderId]);
         
-        // Add status history
         $historyStmt = $conn->prepare("
             INSERT INTO order_status_history (order_id, old_status, new_status, changed_by, changed_by_id, notes, created_at)
             VALUES (:order_id, :old_status, 'cancelled', 'admin', :admin_id, :notes, NOW())
@@ -965,66 +901,12 @@ try {
             ':notes' => $reason
         ]);
         
-        echo json_encode([
-            'success' => true,
-            'message' => 'Order cancelled successfully',
-            'data' => [
-                'order_id' => $orderId,
-                'order_number' => $order['order_number'],
-                'cancelled' => true
-            ]
-        ]);
+        echo json_encode(['success' => true, 'message' => 'Order cancelled']);
         exit();
     }
     
     // =============================================
-    // 10. UPDATE ORDER (Full Update)
-    // =============================================
-    elseif ($method === 'PUT' && $action === 'update' && $orderId) {
-        checkPermission('edit_orders', $auth, $db);
-        
-        $data = json_decode(file_get_contents('php://input'), true);
-        
-        $checkStmt = $conn->prepare("SELECT id, status FROM orders WHERE id = :id");
-        $checkStmt->execute([':id' => $orderId]);
-        $order = $checkStmt->fetch(PDO::FETCH_ASSOC);
-        
-        if (!$order) {
-            echo json_encode(['success' => false, 'message' => 'Order not found']);
-            exit();
-        }
-        
-        $updateFields = [];
-        $params = [':id' => $orderId];
-        
-        $updatableFields = [
-            'delivery_address', 'special_instructions', 'delivery_fee', 'discount_amount'
-        ];
-        
-        foreach ($updatableFields as $field) {
-            if (isset($data[$field])) {
-                $updateFields[] = "$field = :$field";
-                $params[":$field"] = $data[$field];
-            }
-        }
-        
-        if (!empty($updateFields)) {
-            $updateFields[] = "updated_at = NOW()";
-            $updateSql = "UPDATE orders SET " . implode(", ", $updateFields) . " WHERE id = :id";
-            $updateStmt = $conn->prepare($updateSql);
-            $updateStmt->execute($params);
-        }
-        
-        echo json_encode([
-            'success' => true,
-            'message' => 'Order updated successfully',
-            'data' => ['order_id' => $orderId, 'updated' => true]
-        ]);
-        exit();
-    }
-    
-    // =============================================
-    // 11. DELETE ORDER
+    // 10. DELETE ORDER
     // =============================================
     elseif ($method === 'DELETE' && $action === 'delete' && $orderId) {
         checkPermission('delete_orders', $auth, $db);
@@ -1041,7 +923,7 @@ try {
         $force = isset($_GET['force']) ? $_GET['force'] === 'true' : false;
         
         if (in_array($order['status'], ['delivered']) && !$force) {
-            echo json_encode(['success' => false, 'message' => 'Cannot delete a delivered order. Use force=true to override.']);
+            echo json_encode(['success' => false, 'message' => 'Cannot delete delivered order. Use force=true']);
             exit();
         }
         
@@ -1052,63 +934,44 @@ try {
             $conn->prepare("DELETE FROM order_status_history WHERE order_id = :order_id")->execute([':order_id' => $orderId]);
             $conn->prepare("DELETE FROM order_notes WHERE order_id = :order_id")->execute([':order_id' => $orderId]);
             $conn->prepare("DELETE FROM orders WHERE id = :id")->execute([':id' => $orderId]);
-            
             $conn->commit();
             
-            echo json_encode([
-                'success' => true,
-                'message' => 'Order deleted successfully',
-                'data' => ['order_id' => $orderId, 'order_number' => $order['order_number'], 'deleted' => true]
-            ]);
+            echo json_encode(['success' => true, 'message' => 'Order deleted']);
         } catch (Exception $e) {
             $conn->rollBack();
-            echo json_encode(['success' => false, 'message' => 'Failed to delete order: ' . $e->getMessage()]);
+            echo json_encode(['success' => false, 'message' => 'Delete failed: ' . $e->getMessage()]);
         }
         exit();
     }
     
     // =============================================
-    // 12. BULK UPDATE STATUS
+    // 11. BULK UPDATE STATUS
     // =============================================
     elseif ($method === 'POST' && $action === 'bulk-status') {
         checkPermission('edit_orders', $auth, $db);
         
         $data = json_decode(file_get_contents('php://input'), true);
         
-        if (empty($data['order_ids']) || !is_array($data['order_ids'])) {
-            echo json_encode(['success' => false, 'message' => 'order_ids array is required']);
-            exit();
-        }
-        
-        if (!isset($data['status'])) {
-            echo json_encode(['success' => false, 'message' => 'status field is required']);
+        if (empty($data['order_ids']) || !is_array($data['order_ids']) || !isset($data['status'])) {
+            echo json_encode(['success' => false, 'message' => 'order_ids and status required']);
             exit();
         }
         
         $ids = array_map('intval', $data['order_ids']);
         $placeholders = implode(',', array_fill(0, count($ids), '?'));
         $newStatus = $data['status'];
-        $notes = $data['notes'] ?? 'Bulk update by admin';
-        
-        $getStmt = $conn->prepare("SELECT id, status FROM orders WHERE id IN ($placeholders)");
-        $getStmt->execute($ids);
-        $orders = $getStmt->fetchAll(PDO::FETCH_ASSOC);
         
         $updateStmt = $conn->prepare("UPDATE orders SET status = ?, updated_at = NOW() WHERE id IN ($placeholders)");
         $params = array_merge([$newStatus], $ids);
         $updateStmt->execute($params);
         $affected = $updateStmt->rowCount();
         
-        echo json_encode([
-            'success' => true,
-            'message' => "$affected order(s) updated",
-            'data' => ['updated_count' => $affected, 'status' => $newStatus]
-        ]);
+        echo json_encode(['success' => true, 'message' => "$affected order(s) updated"]);
         exit();
     }
     
     // =============================================
-    // 13. BULK ASSIGN DRIVERS
+    // 12. BULK ASSIGN DRIVERS
     // =============================================
     elseif ($method === 'POST' && $action === 'bulk-assign-drivers') {
         checkPermission('assign_drivers', $auth, $db);
@@ -1116,16 +979,14 @@ try {
         $data = json_decode(file_get_contents('php://input'), true);
         
         if (empty($data['assignments']) || !is_array($data['assignments'])) {
-            echo json_encode(['success' => false, 'message' => 'assignments array is required']);
+            echo json_encode(['success' => false, 'message' => 'assignments array required']);
             exit();
         }
         
         $successCount = 0;
-        $results = [];
         
         foreach ($data['assignments'] as $assignment) {
             if (empty($assignment['order_id']) || empty($assignment['driver_id'])) {
-                $results[] = ['order_id' => $assignment['order_id'] ?? 'unknown', 'success' => false, 'error' => 'Missing order_id or driver_id'];
                 continue;
             }
             
@@ -1136,26 +997,17 @@ try {
                 $updateStmt = $conn->prepare("UPDATE orders SET driver_id = :driver_id, updated_at = NOW() WHERE id = :order_id");
                 $updateStmt->execute([':driver_id' => $driverId, ':order_id' => $orderId]);
                 $successCount++;
-                $results[] = ['order_id' => $orderId, 'driver_id' => $driverId, 'success' => true];
             } catch (Exception $e) {
-                $results[] = ['order_id' => $orderId, 'success' => false, 'error' => $e->getMessage()];
+                // Skip failed
             }
         }
         
-        echo json_encode([
-            'success' => true,
-            'message' => "$successCount order(s) assigned successfully",
-            'data' => [
-                'success_count' => $successCount,
-                'total' => count($data['assignments']),
-                'results' => $results
-            ]
-        ]);
+        echo json_encode(['success' => true, 'message' => "$successCount order(s) assigned"]);
         exit();
     }
     
     // =============================================
-    // 14. BULK DELETE ORDERS
+    // 13. BULK DELETE ORDERS
     // =============================================
     elseif ($method === 'POST' && $action === 'bulk-delete') {
         checkPermission('delete_orders', $auth, $db);
@@ -1163,123 +1015,155 @@ try {
         $data = json_decode(file_get_contents('php://input'), true);
         
         if (empty($data['order_ids']) || !is_array($data['order_ids'])) {
-            echo json_encode(['success' => false, 'message' => 'order_ids array is required']);
+            echo json_encode(['success' => false, 'message' => 'order_ids array required']);
             exit();
         }
         
         $ids = array_map('intval', $data['order_ids']);
-        $force = isset($data['force']) && $data['force'] === true;
-        
         $placeholders = implode(',', array_fill(0, count($ids), '?'));
         
-        if (!$force) {
-            $checkStmt = $conn->prepare("SELECT id FROM orders WHERE id IN ($placeholders) AND status = 'delivered'");
-            $checkStmt->execute($ids);
-            $deliveredOrders = $checkStmt->fetchAll(PDO::FETCH_ASSOC);
-            
-            if (!empty($deliveredOrders)) {
-                echo json_encode(['success' => false, 'message' => 'Cannot delete delivered orders. Use force=true to override.']);
-                exit();
-            }
-        }
+        $deleteStmt = $conn->prepare("DELETE FROM orders WHERE id IN ($placeholders)");
+        $deleteStmt->execute($ids);
+        $deletedCount = $deleteStmt->rowCount();
         
-        $conn->beginTransaction();
-        
-        try {
-            $deleteStmt = $conn->prepare("DELETE FROM orders WHERE id IN ($placeholders)");
-            $deleteStmt->execute($ids);
-            $deletedCount = $deleteStmt->rowCount();
-            
-            $conn->commit();
-            
-            echo json_encode([
-                'success' => true,
-                'message' => "$deletedCount order(s) deleted successfully",
-                'data' => ['deleted_count' => $deletedCount, 'total_requested' => count($ids)]
-            ]);
-        } catch (Exception $e) {
-            $conn->rollBack();
-            echo json_encode(['success' => false, 'message' => 'Failed to delete orders: ' . $e->getMessage()]);
-        }
+        echo json_encode(['success' => true, 'message' => "$deletedCount order(s) deleted"]);
         exit();
     }
     
     // =============================================
-    // 15. GET ORDER STATISTICS
+    // 14. CALCULATE DELIVERY FEE (SINGLE BIKE RULE)
     // =============================================
-    elseif ($method === 'GET' && $action === 'stats') {
+    elseif ($method === 'POST' && $action === 'calculate-fee') {
         checkPermission('view_orders', $auth, $db);
         
-        $stats = [];
+        $data = json_decode(file_get_contents('php://input'), true);
         
-        $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE DATE(created_at) = CURDATE()");
-        $stats['today_orders'] = intval($stmt->fetchColumn());
+        $BASE_DISTANCE_KM = 2;
+        $BASE_FEE_MWK = 1000;
+        $ADDITIONAL_KM_RATE_MWK = 300;
+        $FREE_DELIVERY_THRESHOLD_MWK = 50000;
         
-        $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status = 'pending'");
-        $stats['pending_orders'] = intval($stmt->fetchColumn());
+        $distanceKm = isset($data['distance_km']) ? floatval($data['distance_km']) : 0;
+        $orderTotal = isset($data['order_total']) ? floatval($data['order_total']) : 0;
         
-        $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status IN ('confirmed', 'preparing', 'ready', 'out_for_delivery')");
-        $stats['active_orders'] = intval($stmt->fetchColumn());
+        // Calculate from coordinates if provided
+        $pickupLat = isset($data['pickup_latitude']) ? floatval($data['pickup_latitude']) : null;
+        $pickupLng = isset($data['pickup_longitude']) ? floatval($data['pickup_longitude']) : null;
+        $deliveryLat = isset($data['delivery_latitude']) ? floatval($data['delivery_latitude']) : null;
+        $deliveryLng = isset($data['delivery_longitude']) ? floatval($data['delivery_longitude']) : null;
         
-        $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status = 'delivered' AND MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE())");
-        $stats['completed_this_month'] = intval($stmt->fetchColumn());
-        
-        $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status = 'cancelled' AND MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE())");
-        $stats['cancelled_this_month'] = intval($stmt->fetchColumn());
-        
-        $stmt = $conn->query("SELECT COALESCE(AVG(total_amount), 0) FROM orders WHERE status NOT IN ('cancelled', 'rejected')");
-        $stats['avg_order_value'] = floatval($stmt->fetchColumn());
-        $stats['formatted_avg_order_value'] = formatCurrency($stats['avg_order_value']);
-        
-        $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'delivered'");
-        $stats['total_revenue'] = floatval($stmt->fetchColumn());
-        $stats['formatted_total_revenue'] = formatCurrency($stats['total_revenue']);
-        
-        $stmt = $conn->query("SELECT COUNT(*) FROM orders");
-        $stats['total_orders'] = intval($stmt->fetchColumn());
-        
-        $statusStmt = $conn->query("SELECT status, COUNT(*) as count FROM orders GROUP BY status");
-        $stats['by_status'] = [];
-        while ($row = $statusStmt->fetch(PDO::FETCH_ASSOC)) {
-            $stats['by_status'][$row['status']] = intval($row['count']);
+        if ($pickupLat && $pickupLng && $deliveryLat && $deliveryLng) {
+            $earthRadius = 6371;
+            $latDelta = deg2rad($deliveryLat - $pickupLat);
+            $lonDelta = deg2rad($deliveryLng - $pickupLng);
+            $a = sin($latDelta / 2) * sin($latDelta / 2) +
+                 cos(deg2rad($pickupLat)) * cos(deg2rad($deliveryLat)) *
+                 sin($lonDelta / 2) * sin($lonDelta / 2);
+            $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
+            $distanceKm = round($earthRadius * $c, 2);
         }
         
-        // Weekly orders (last 7 days)
-        $weeklyStmt = $conn->prepare("
-            SELECT DATE(created_at) as date, COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue
-            FROM orders 
-            WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-            GROUP BY DATE(created_at)
-            ORDER BY date ASC
-        ");
-        $weeklyStmt->execute();
-        $stats['weekly'] = $weeklyStmt->fetchAll(PDO::FETCH_ASSOC);
+        $isFreeDelivery = ($orderTotal >= $FREE_DELIVERY_THRESHOLD_MWK);
+        
+        if ($isFreeDelivery) {
+            $deliveryFee = 0;
+        } else {
+            $extraKm = max(0, $distanceKm - $BASE_DISTANCE_KM);
+            $deliveryFee = $BASE_FEE_MWK + ($extraKm * $ADDITIONAL_KM_RATE_MWK);
+        }
         
         echo json_encode([
             'success' => true,
-            'data' => ['stats' => $stats]
+            'data' => [
+                'distance_km' => $distanceKm,
+                'order_total' => $orderTotal,
+                'base_distance_km' => $BASE_DISTANCE_KM,
+                'base_fee' => $BASE_FEE_MWK,
+                'additional_km_rate' => $ADDITIONAL_KM_RATE_MWK,
+                'free_delivery_threshold' => $FREE_DELIVERY_THRESHOLD_MWK,
+                'delivery_fee' => round($deliveryFee),
+                'is_free_delivery' => $isFreeDelivery
+            ]
         ]);
         exit();
     }
     
     // =============================================
-    // 16. GET RECENT ORDERS
+    // 15. UPDATE PAYMENT STATUS
+    // =============================================
+    elseif ($method === 'PUT' && $action === 'update-payment' && $orderId) {
+        checkPermission('edit_orders', $auth, $db);
+        
+        $data = json_decode(file_get_contents('php://input'), true);
+        
+        if (!isset($data['payment_status'])) {
+            echo json_encode(['success' => false, 'message' => 'payment_status required']);
+            exit();
+        }
+        
+        $validStatuses = ['pending', 'paid', 'failed', 'refunded'];
+        if (!in_array($data['payment_status'], $validStatuses)) {
+            echo json_encode(['success' => false, 'message' => 'Invalid payment status']);
+            exit();
+        }
+        
+        $updateStmt = $conn->prepare("UPDATE orders SET payment_status = :status, updated_at = NOW() WHERE id = :id");
+        $updateStmt->execute([':status' => $data['payment_status'], ':id' => $orderId]);
+        
+        echo json_encode(['success' => true, 'message' => 'Payment status updated']);
+        exit();
+    }
+    
+    // =============================================
+    // 16. GET ORDER STATISTICS (Simplified)
+    // =============================================
+    elseif ($method === 'GET' && $action === 'stats') {
+        checkPermission('view_orders', $auth, $db);
+        
+        $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE DATE(created_at) = CURDATE()");
+        $todayOrders = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status = 'pending'");
+        $pendingOrders = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status = 'delivered'");
+        $deliveredOrders = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COUNT(*) FROM orders WHERE status = 'cancelled'");
+        $cancelledOrders = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status = 'delivered'");
+        $totalRevenue = floatval($stmt->fetchColumn());
+        
+        echo json_encode([
+            'success' => true,
+            'data' => [
+                'stats' => [
+                    'today_orders' => $todayOrders,
+                    'pending_orders' => $pendingOrders,
+                    'delivered_orders' => $deliveredOrders,
+                    'cancelled_orders' => $cancelledOrders,
+                    'total_revenue' => $totalRevenue,
+                    'formatted_total_revenue' => formatCurrency($totalRevenue)
+                ]
+            ]
+        ]);
+        exit();
+    }
+    
+    // =============================================
+    // 17. GET RECENT ORDERS
     // =============================================
     elseif ($method === 'GET' && $action === 'recent') {
         checkPermission('view_orders', $auth, $db);
         
-        $limit = isset($_GET['limit']) ? min(20, max(1, intval($_GET['limit']))) : 10;
+        $limit = isset($_GET['limit']) ? min(10, max(1, intval($_GET['limit']))) : 5;
         
         $stmt = $conn->prepare("
-            SELECT 
-                o.id, o.order_number, o.status, o.total_amount, o.created_at,
-                u.full_name as customer_name,
-                m.name as merchant_name,
-                d.full_name as driver_name
+            SELECT o.id, o.order_number, o.status, o.total_amount, o.created_at,
+                   u.full_name as customer_name
             FROM orders o
             LEFT JOIN users u ON o.user_id = u.id
-            LEFT JOIN merchants m ON o.merchant_id = m.id
-            LEFT JOIN drivers d ON o.driver_id = d.id
             ORDER BY o.created_at DESC
             LIMIT :limit
         ");
@@ -1292,276 +1176,60 @@ try {
             $order['formatted_date'] = formatDate($order['created_at']);
         }
         
-        echo json_encode([
-            'success' => true,
-            'data' => ['orders' => $orders]
-        ]);
+        echo json_encode(['success' => true, 'data' => ['orders' => $orders]]);
         exit();
     }
     
     // =============================================
-    // 17. ADD NOTE TO ORDER
-    // =============================================
-    elseif ($method === 'POST' && $action === 'add-note' && $orderId) {
-        checkPermission('edit_orders', $auth, $db);
-        
-        $data = json_decode(file_get_contents('php://input'), true);
-        
-        if (empty($data['note'])) {
-            echo json_encode(['success' => false, 'message' => 'Note is required']);
-            exit();
-        }
-        
-        $noteStmt = $conn->prepare("
-            INSERT INTO order_notes (order_id, admin_id, note, is_internal, created_at)
-            VALUES (:order_id, :admin_id, :note, :is_internal, NOW())
-        ");
-        $noteStmt->execute([
-            ':order_id' => $orderId,
-            ':admin_id' => $admin['id'],
-            ':note' => $data['note'],
-            ':is_internal' => $data['is_internal'] ?? 1
-        ]);
-        
-        echo json_encode([
-            'success' => true,
-            'message' => 'Note added successfully'
-        ]);
-        exit();
-    }
-    
-    // =============================================
-    // 18. SEARCH CUSTOMERS
-    // =============================================
-    elseif ($method === 'GET' && $action === 'search-customers') {
-        checkPermission('view_orders', $auth, $db);
-        
-        $search = isset($_GET['q']) ? trim($_GET['q']) : '';
-        $limit = isset($_GET['limit']) ? min(50, max(1, intval($_GET['limit']))) : 20;
-        
-        if (strlen($search) < 2) {
-            echo json_encode([
-                'success' => true,
-                'data' => ['customers' => [], 'total' => 0]
-            ]);
-            exit();
-        }
-        
-        $stmt = $conn->prepare("
-            SELECT 
-                u.id, 
-                u.full_name as name, 
-                u.email, 
-                u.phone,
-                u.verified as is_active,
-                u.total_orders,
-                (SELECT COUNT(*) FROM orders WHERE user_id = u.id AND status = 'delivered') as completed_orders,
-                (SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE user_id = u.id AND status = 'delivered') as total_spent
-            FROM users u
-            WHERE u.verified = 1 
-            AND (u.full_name LIKE :search 
-                 OR u.email LIKE :search 
-                 OR u.phone LIKE :search)
-            ORDER BY 
-                CASE 
-                    WHEN u.full_name LIKE :exact THEN 1
-                    WHEN u.full_name LIKE :starts THEN 2
-                    ELSE 3
-                END,
-                u.full_name ASC
-            LIMIT :limit
-        ");
-        
-        $searchTerm = "%$search%";
-        $stmt->bindValue(':search', $searchTerm);
-        $stmt->bindValue(':exact', $search);
-        $stmt->bindValue(':starts', "$search%");
-        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
-        $stmt->execute();
-        
-        $customers = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        foreach ($customers as &$customer) {
-            $customer['formatted_total_spent'] = formatCurrency($customer['total_spent']);
-        }
-        
-        echo json_encode([
-            'success' => true,
-            'data' => [
-                'customers' => $customers,
-                'total' => count($customers)
-            ]
-        ]);
-        exit();
-    }
-    
-    // =============================================
-    // 19. EXPORT ORDERS
-    // =============================================
-    elseif ($method === 'GET' && $action === 'export') {
-        checkPermission('view_orders', $auth, $db);
-        
-        $search = isset($_GET['search']) ? trim($_GET['search']) : '';
-        $status = isset($_GET['status']) ? $_GET['status'] : '';
-        $merchantId = isset($_GET['merchant_id']) ? intval($_GET['merchant_id']) : null;
-        $dateFrom = isset($_GET['date_from']) ? $_GET['date_from'] : '';
-        $dateTo = isset($_GET['date_to']) ? $_GET['date_to'] : '';
-        $includeItems = isset($_GET['include_items']) ? $_GET['include_items'] === 'true' : false;
-        
-        $where = [];
-        $params = [];
-        
-        if ($search) {
-            $where[] = "(o.order_number LIKE :search OR u.full_name LIKE :search OR u.email LIKE :search OR m.name LIKE :search)";
-            $params[':search'] = "%$search%";
-        }
-        if ($status) {
-            $where[] = "o.status = :status";
-            $params[':status'] = $status;
-        }
-        if ($merchantId) {
-            $where[] = "o.merchant_id = :merchant_id";
-            $params[':merchant_id'] = $merchantId;
-        }
-        if ($dateFrom) {
-            $where[] = "DATE(o.created_at) >= :date_from";
-            $params[':date_from'] = $dateFrom;
-        }
-        if ($dateTo) {
-            $where[] = "DATE(o.created_at) <= :date_to";
-            $params[':date_to'] = $dateTo;
-        }
-        
-        $whereClause = empty($where) ? "" : "WHERE " . implode(" AND ", $where);
-        
-        $sql = "SELECT 
-                    o.order_number, o.status, o.subtotal, o.delivery_fee, o.tip_amount,
-                    o.discount_amount, o.total_amount, o.payment_method, o.payment_status,
-                    o.delivery_address, o.special_instructions, o.cancellation_reason,
-                    o.created_at, o.updated_at,
-                    u.full_name as customer_name, u.email as customer_email, u.phone as customer_phone,
-                    m.name as merchant_name, m.phone as merchant_phone,
-                    d.full_name as driver_name, d.phone as driver_phone
-                FROM orders o
-                LEFT JOIN users u ON o.user_id = u.id
-                LEFT JOIN merchants m ON o.merchant_id = m.id
-                LEFT JOIN drivers d ON o.driver_id = d.id
-                $whereClause
-                ORDER BY o.created_at DESC";
-        
-        $stmt = $conn->prepare($sql);
-        foreach ($params as $key => $value) {
-            $stmt->bindValue($key, $value);
-        }
-        $stmt->execute();
-        $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        while (ob_get_level()) ob_end_clean();
-        
-        header('Content-Type: text/csv; charset=utf-8');
-        header('Content-Disposition: attachment; filename="orders_export_' . date('Y-m-d_His') . '.csv"');
-        
-        $output = fopen('php://output', 'w');
-        fprintf($output, chr(0xEF) . chr(0xBB) . chr(0xBF));
-        
-        fputcsv($output, ['Order #', 'Status', 'Customer', 'Email', 'Phone', 'Merchant', 'Driver', 'Subtotal', 'Delivery Fee', 'Tip', 'Discount', 'Total', 'Payment Method', 'Delivery Address', 'Created At']);
-        
-        foreach ($orders as $order) {
-            fputcsv($output, [
-                $order['order_number'],
-                $order['status'],
-                $order['customer_name'],
-                $order['customer_email'],
-                $order['customer_phone'],
-                $order['merchant_name'],
-                $order['driver_name'] ?? 'Unassigned',
-                number_format($order['subtotal'], 2),
-                number_format($order['delivery_fee'], 2),
-                number_format($order['tip_amount'] ?? 0, 2),
-                number_format($order['discount_amount'], 2),
-                number_format($order['total_amount'], 2),
-                $order['payment_method'],
-                $order['delivery_address'],
-                $order['created_at']
-            ]);
-        }
-        
-        fclose($output);
-        exit();
-    }
-    
-    // =============================================
-    // 20. GET CUSTOMER ADDRESSES
+    // 18. GET CUSTOMER ADDRESSES
     // =============================================
     elseif ($method === 'GET' && $action === 'customer-addresses' && isset($_GET['customer_id'])) {
         checkPermission('view_orders', $auth, $db);
         
         $customerId = intval($_GET['customer_id']);
         
-        $checkStmt = $conn->prepare("SELECT id, full_name, email, phone FROM users WHERE id = :id");
-        $checkStmt->execute([':id' => $customerId]);
-        $customer = $checkStmt->fetch(PDO::FETCH_ASSOC);
-        
-        if (!$customer) {
-            echo json_encode(['success' => false, 'message' => 'Customer not found']);
-            exit();
-        }
-        
         $addrStmt = $conn->prepare("
-            SELECT id, formatted_address as address, label, is_default, landmark, instructions, latitude, longitude
+            SELECT id, formatted_address as address, label, is_default
             FROM addresses 
             WHERE user_id = :user_id 
-            ORDER BY is_default DESC, created_at DESC
+            ORDER BY is_default DESC
         ");
         $addrStmt->execute([':user_id' => $customerId]);
         $addresses = $addrStmt->fetchAll(PDO::FETCH_ASSOC);
         
-        echo json_encode([
-            'success' => true,
-            'data' => [
-                'customer_id' => $customerId,
-                'customer_name' => $customer['full_name'],
-                'customer_email' => $customer['email'],
-                'customer_phone' => $customer['phone'],
-                'addresses' => $addresses
-            ]
-        ]);
+        echo json_encode(['success' => true, 'data' => ['addresses' => $addresses]]);
         exit();
     }
     
     // =============================================
-    // 21. UPDATE PAYMENT STATUS
+    // 19. SEARCH CUSTOMERS
     // =============================================
-    elseif ($method === 'PUT' && $action === 'update-payment' && $orderId) {
-        checkPermission('edit_orders', $auth, $db);
+    elseif ($method === 'GET' && $action === 'search-customers') {
+        checkPermission('view_orders', $auth, $db);
         
-        $data = json_decode(file_get_contents('php://input'), true);
+        $search = isset($_GET['q']) ? trim($_GET['q']) : '';
+        $limit = isset($_GET['limit']) ? min(20, max(1, intval($_GET['limit']))) : 10;
         
-        if (!isset($data['payment_status'])) {
-            echo json_encode(['success' => false, 'message' => 'payment_status is required']);
+        if (strlen($search) < 2) {
+            echo json_encode(['success' => true, 'data' => ['customers' => []]]);
             exit();
         }
         
-        $validStatuses = ['pending', 'paid', 'failed', 'refunded'];
-        if (!in_array($data['payment_status'], $validStatuses)) {
-            echo json_encode(['success' => false, 'message' => 'Invalid payment status']);
-            exit();
-        }
-        
-        $updateStmt = $conn->prepare("
-            UPDATE orders 
-            SET payment_status = :payment_status, updated_at = NOW() 
-            WHERE id = :id
+        $stmt = $conn->prepare("
+            SELECT id, full_name as name, email, phone
+            FROM users 
+            WHERE verified = 1 
+            AND (full_name LIKE :search OR email LIKE :search OR phone LIKE :search)
+            ORDER BY full_name ASC
+            LIMIT :limit
         ");
-        $updateStmt->execute([
-            ':payment_status' => $data['payment_status'],
-            ':id' => $orderId
-        ]);
+        $searchTerm = "%$search%";
+        $stmt->bindValue(':search', $searchTerm);
+        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+        $customers = $stmt->fetchAll(PDO::FETCH_ASSOC);
         
-        echo json_encode([
-            'success' => true,
-            'message' => 'Payment status updated successfully'
-        ]);
+        echo json_encode(['success' => true, 'data' => ['customers' => $customers]]);
         exit();
     }
     
@@ -1571,18 +1239,18 @@ try {
     else {
         echo json_encode([
             'success' => false,
-            'message' => 'Invalid action. Available: list, details, get-customers, search-customers, customer-addresses, create, update-status, assign-driver, remove-driver, cancel, update, delete, bulk-status, bulk-assign-drivers, bulk-delete, stats, recent, add-note, update-payment, export'
+            'message' => 'Invalid action. Available: list, details, get-customers, search-customers, customer-addresses, create, update-status, assign-driver, remove-driver, cancel, delete, bulk-status, bulk-assign-drivers, bulk-delete, calculate-fee, update-payment, stats, recent'
         ]);
         exit();
     }
     
 } catch (PDOException $e) {
-    error_log("Database error in admin_orders.php: " . $e->getMessage());
-    echo json_encode(['success' => false, 'message' => 'Database error: ' . $e->getMessage()]);
+    error_log("Database error: " . $e->getMessage());
+    echo json_encode(['success' => false, 'message' => 'Database error occurred']);
     exit();
 } catch (Exception $e) {
-    error_log("General error in admin_orders.php: " . $e->getMessage());
-    echo json_encode(['success' => false, 'message' => 'Error: ' . $e->getMessage()]);
+    error_log("General error: " . $e->getMessage());
+    echo json_encode(['success' => false, 'message' => 'An error occurred']);
     exit();
 }
 ?>
