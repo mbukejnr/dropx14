@@ -1,6 +1,6 @@
 <?php
 // backend/api/admin/drivers.php
-// DRIVER MANAGEMENT API - CRUD, Availability, Export, Import, Bulk Operations
+// DRIVER MANAGEMENT API - CRUD, Availability, Export, Import, Bulk Operations (FULL VERSION)
 
 // =============================================
 // CORS HEADERS
@@ -494,9 +494,6 @@ elseif ($method === 'POST' && $action === 'import') {
     $headers = array_shift($csvData);
     $headers = array_map('trim', $headers);
     
-    // Expected headers
-    $expectedHeaders = ['full_name', 'email', 'phone', 'vehicle_type', 'vehicle_registration'];
-    
     $successCount = 0;
     $failCount = 0;
     $errors = [];
@@ -509,14 +506,12 @@ elseif ($method === 'POST' && $action === 'import') {
             
             $rowData = array_combine($headers, $row);
             
-            // Skip if no name or phone
             if (empty($rowData['full_name']) || empty($rowData['phone'])) {
                 $failCount++;
                 $errors[] = ['row' => $rowIndex + 2, 'error' => 'Missing name or phone'];
                 continue;
             }
             
-            // Check if phone already exists
             $checkStmt = $conn->prepare("SELECT id FROM delivery_drivers WHERE phone = :phone");
             $checkStmt->execute([':phone' => $rowData['phone']]);
             if ($checkStmt->fetch()) {
@@ -525,7 +520,6 @@ elseif ($method === 'POST' && $action === 'import') {
                 continue;
             }
             
-            // Insert driver
             $stmt = $conn->prepare("
                 INSERT INTO delivery_drivers (
                     name, email, phone, vehicle_type, vehicle_registration,
@@ -601,7 +595,11 @@ elseif ($method === 'POST' && $action === 'bulk-status') {
     }
     
     $updateFields[] = "updated_at = NOW()";
-    $params = array_merge($params, $ids);
+    
+    // Add all IDs to params
+    foreach ($ids as $id) {
+        $params[] = $id;
+    }
     
     $sql = "UPDATE delivery_drivers SET " . implode(", ", $updateFields) . " WHERE id IN ($placeholders)";
     $stmt = $conn->prepare($sql);
@@ -633,9 +631,7 @@ elseif ($method === 'POST' && $action === 'bulk-delete') {
     $placeholders = implode(',', array_fill(0, count($ids), '?'));
     
     // Check which drivers have orders
-    $checkStmt = $conn->prepare("
-        SELECT DISTINCT driver_id FROM orders WHERE driver_id IN ($placeholders)
-    ");
+    $checkStmt = $conn->prepare("SELECT DISTINCT driver_id FROM orders WHERE driver_id IN ($placeholders)");
     $checkStmt->execute($ids);
     $driversWithOrders = $checkStmt->fetchAll(PDO::FETCH_COLUMN);
     
@@ -651,13 +647,16 @@ elseif ($method === 'POST' && $action === 'bulk-delete') {
     }
     
     $deletedCount = 0;
+    $hardDeletedCount = 0;
+    $softDeletedCount = 0;
     
     // Hard delete drivers with no orders
     if (!empty($driversToHardDelete)) {
         $placeholdersHard = implode(',', array_fill(0, count($driversToHardDelete), '?'));
         $deleteStmt = $conn->prepare("DELETE FROM delivery_drivers WHERE id IN ($placeholdersHard)");
         $deleteStmt->execute($driversToHardDelete);
-        $deletedCount += $deleteStmt->rowCount();
+        $hardDeletedCount = $deleteStmt->rowCount();
+        $deletedCount += $hardDeletedCount;
     }
     
     // Soft delete drivers with orders
@@ -665,7 +664,8 @@ elseif ($method === 'POST' && $action === 'bulk-delete') {
         $placeholdersSoft = implode(',', array_fill(0, count($driversToSoftDelete), '?'));
         $updateStmt = $conn->prepare("UPDATE delivery_drivers SET is_active = 0, updated_at = NOW() WHERE id IN ($placeholdersSoft)");
         $updateStmt->execute($driversToSoftDelete);
-        $deletedCount += $updateStmt->rowCount();
+        $softDeletedCount = $updateStmt->rowCount();
+        $deletedCount += $softDeletedCount;
     }
     
     echo json_encode([
@@ -673,8 +673,8 @@ elseif ($method === 'POST' && $action === 'bulk-delete') {
         'message' => "$deletedCount driver(s) processed",
         'data' => [
             'deleted_count' => $deletedCount,
-            'hard_deleted' => count($driversToHardDelete),
-            'soft_deleted' => count($driversToSoftDelete)
+            'hard_deleted' => $hardDeletedCount,
+            'soft_deleted' => $softDeletedCount
         ]
     ]);
     exit();
