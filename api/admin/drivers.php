@@ -1,6 +1,6 @@
 <?php
 // backend/api/admin/drivers.php
-// DRIVER MANAGEMENT API - CRUD, Availability, Vehicle Management (Bikes & Cars only)
+// DRIVER MANAGEMENT API - CRUD, Availability, Export, Import, Bulk Operations
 
 // =============================================
 // CORS HEADERS
@@ -397,13 +397,297 @@ elseif ($method === 'GET' && $action === 'stats') {
 }
 
 // =============================================
+// 8. EXPORT DRIVERS TO CSV
+// =============================================
+elseif ($method === 'GET' && $action === 'export') {
+    checkPermission('view_drivers', $auth, $db);
+    
+    $search = isset($_GET['search']) ? trim($_GET['search']) : '';
+    $status = isset($_GET['status']) ? $_GET['status'] : '';
+    $vehicleType = isset($_GET['vehicle_type']) ? $_GET['vehicle_type'] : '';
+    
+    $where = ["is_active = 1"];
+    $params = [];
+    
+    if ($search) {
+        $where[] = "(name LIKE :search OR email LIKE :search OR phone LIKE :search)";
+        $params[':search'] = "%$search%";
+    }
+    
+    if ($status === 'available') {
+        $where[] = "is_available = 1";
+    } elseif ($status === 'unavailable') {
+        $where[] = "is_available = 0";
+    }
+    
+    if ($vehicleType && $vehicleType !== 'all') {
+        $where[] = "vehicle_type = :vehicle_type";
+        $params[':vehicle_type'] = $vehicleType;
+    }
+    
+    $whereClause = "WHERE " . implode(" AND ", $where);
+    
+    $sql = "SELECT 
+                id, name as full_name, email, phone, vehicle_type, vehicle_registration,
+                is_available, is_active, created_at
+            FROM delivery_drivers
+            $whereClause
+            ORDER BY name ASC";
+    
+    $stmt = $conn->prepare($sql);
+    foreach ($params as $key => $value) {
+        $stmt->bindValue($key, $value);
+    }
+    $stmt->execute();
+    $drivers = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    while (ob_get_level()) ob_end_clean();
+    
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="drivers_export_' . date('Y-m-d_His') . '.csv"');
+    
+    $output = fopen('php://output', 'w');
+    fprintf($output, chr(0xEF) . chr(0xBB) . chr(0xBF));
+    
+    // Headers
+    fputcsv($output, ['ID', 'Full Name', 'Email', 'Phone', 'Vehicle Type', 'Number Plate', 'Status', 'Active', 'Created At']);
+    
+    // Data
+    foreach ($drivers as $driver) {
+        fputcsv($output, [
+            $driver['id'],
+            $driver['full_name'],
+            $driver['email'],
+            $driver['phone'],
+            $driver['vehicle_type'],
+            $driver['vehicle_registration'] ?? '',
+            $driver['is_available'] ? 'Available' : 'Unavailable',
+            $driver['is_active'] ? 'Active' : 'Inactive',
+            $driver['created_at']
+        ]);
+    }
+    
+    fclose($output);
+    exit();
+}
+
+// =============================================
+// 9. IMPORT DRIVERS FROM CSV
+// =============================================
+elseif ($method === 'POST' && $action === 'import') {
+    checkPermission('manage_drivers', $auth, $db);
+    
+    if (!isset($_FILES['csv_file']) || $_FILES['csv_file']['error'] !== UPLOAD_ERR_OK) {
+        echo json_encode(['success' => false, 'message' => 'CSV file is required']);
+        exit();
+    }
+    
+    $file = $_FILES['csv_file'];
+    $fileInfo = pathinfo($file['name']);
+    
+    if (strtolower($fileInfo['extension']) !== 'csv') {
+        echo json_encode(['success' => false, 'message' => 'Only CSV files are allowed']);
+        exit();
+    }
+    
+    $csvData = array_map('str_getcsv', file($file['tmp_name']));
+    $headers = array_shift($csvData);
+    $headers = array_map('trim', $headers);
+    
+    // Expected headers
+    $expectedHeaders = ['full_name', 'email', 'phone', 'vehicle_type', 'vehicle_registration'];
+    
+    $successCount = 0;
+    $failCount = 0;
+    $errors = [];
+    
+    $conn->beginTransaction();
+    
+    try {
+        foreach ($csvData as $rowIndex => $row) {
+            if (count(array_filter($row)) === 0) continue;
+            
+            $rowData = array_combine($headers, $row);
+            
+            // Skip if no name or phone
+            if (empty($rowData['full_name']) || empty($rowData['phone'])) {
+                $failCount++;
+                $errors[] = ['row' => $rowIndex + 2, 'error' => 'Missing name or phone'];
+                continue;
+            }
+            
+            // Check if phone already exists
+            $checkStmt = $conn->prepare("SELECT id FROM delivery_drivers WHERE phone = :phone");
+            $checkStmt->execute([':phone' => $rowData['phone']]);
+            if ($checkStmt->fetch()) {
+                $failCount++;
+                $errors[] = ['row' => $rowIndex + 2, 'error' => 'Phone already exists: ' . $rowData['phone']];
+                continue;
+            }
+            
+            // Insert driver
+            $stmt = $conn->prepare("
+                INSERT INTO delivery_drivers (
+                    name, email, phone, vehicle_type, vehicle_registration,
+                    is_available, is_active, created_at, updated_at
+                ) VALUES (
+                    :name, :email, :phone, :vehicle_type, :vehicle_registration,
+                    1, 1, NOW(), NOW()
+                )
+            ");
+            
+            $stmt->execute([
+                ':name' => $rowData['full_name'],
+                ':email' => $rowData['email'] ?? null,
+                ':phone' => $rowData['phone'],
+                ':vehicle_type' => $rowData['vehicle_type'] ?? 'bike',
+                ':vehicle_registration' => $rowData['vehicle_registration'] ?? null
+            ]);
+            
+            $successCount++;
+        }
+        
+        $conn->commit();
+        
+        echo json_encode([
+            'success' => true,
+            'message' => "Import completed: $successCount imported, $failCount failed",
+            'data' => [
+                'imported' => $successCount,
+                'failed' => $failCount,
+                'errors' => $errors
+            ]
+        ]);
+        
+    } catch (Exception $e) {
+        $conn->rollBack();
+        echo json_encode(['success' => false, 'message' => 'Import failed: ' . $e->getMessage()]);
+    }
+    exit();
+}
+
+// =============================================
+// 10. BULK UPDATE STATUS
+// =============================================
+elseif ($method === 'POST' && $action === 'bulk-status') {
+    checkPermission('manage_drivers', $auth, $db);
+    
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    if (empty($data['driver_ids']) || !is_array($data['driver_ids'])) {
+        echo json_encode(['success' => false, 'message' => 'driver_ids array is required']);
+        exit();
+    }
+    
+    if (!isset($data['is_active']) && !isset($data['is_available'])) {
+        echo json_encode(['success' => false, 'message' => 'is_active or is_available field is required']);
+        exit();
+    }
+    
+    $ids = array_map('intval', $data['driver_ids']);
+    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+    
+    $updateFields = [];
+    $params = [];
+    
+    if (isset($data['is_active'])) {
+        $updateFields[] = "is_active = ?";
+        $params[] = intval($data['is_active']);
+    }
+    
+    if (isset($data['is_available'])) {
+        $updateFields[] = "is_available = ?";
+        $params[] = intval($data['is_available']);
+    }
+    
+    $updateFields[] = "updated_at = NOW()";
+    $params = array_merge($params, $ids);
+    
+    $sql = "UPDATE delivery_drivers SET " . implode(", ", $updateFields) . " WHERE id IN ($placeholders)";
+    $stmt = $conn->prepare($sql);
+    $stmt->execute($params);
+    $affected = $stmt->rowCount();
+    
+    echo json_encode([
+        'success' => true,
+        'message' => "$affected driver(s) updated",
+        'data' => ['updated_count' => $affected]
+    ]);
+    exit();
+}
+
+// =============================================
+// 11. BULK DELETE DRIVERS
+// =============================================
+elseif ($method === 'POST' && $action === 'bulk-delete') {
+    checkPermission('manage_drivers', $auth, $db);
+    
+    $data = json_decode(file_get_contents('php://input'), true);
+    
+    if (empty($data['driver_ids']) || !is_array($data['driver_ids'])) {
+        echo json_encode(['success' => false, 'message' => 'driver_ids array is required']);
+        exit();
+    }
+    
+    $ids = array_map('intval', $data['driver_ids']);
+    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+    
+    // Check which drivers have orders
+    $checkStmt = $conn->prepare("
+        SELECT DISTINCT driver_id FROM orders WHERE driver_id IN ($placeholders)
+    ");
+    $checkStmt->execute($ids);
+    $driversWithOrders = $checkStmt->fetchAll(PDO::FETCH_COLUMN);
+    
+    $driversToHardDelete = [];
+    $driversToSoftDelete = [];
+    
+    foreach ($ids as $id) {
+        if (in_array($id, $driversWithOrders)) {
+            $driversToSoftDelete[] = $id;
+        } else {
+            $driversToHardDelete[] = $id;
+        }
+    }
+    
+    $deletedCount = 0;
+    
+    // Hard delete drivers with no orders
+    if (!empty($driversToHardDelete)) {
+        $placeholdersHard = implode(',', array_fill(0, count($driversToHardDelete), '?'));
+        $deleteStmt = $conn->prepare("DELETE FROM delivery_drivers WHERE id IN ($placeholdersHard)");
+        $deleteStmt->execute($driversToHardDelete);
+        $deletedCount += $deleteStmt->rowCount();
+    }
+    
+    // Soft delete drivers with orders
+    if (!empty($driversToSoftDelete)) {
+        $placeholdersSoft = implode(',', array_fill(0, count($driversToSoftDelete), '?'));
+        $updateStmt = $conn->prepare("UPDATE delivery_drivers SET is_active = 0, updated_at = NOW() WHERE id IN ($placeholdersSoft)");
+        $updateStmt->execute($driversToSoftDelete);
+        $deletedCount += $updateStmt->rowCount();
+    }
+    
+    echo json_encode([
+        'success' => true,
+        'message' => "$deletedCount driver(s) processed",
+        'data' => [
+            'deleted_count' => $deletedCount,
+            'hard_deleted' => count($driversToHardDelete),
+            'soft_deleted' => count($driversToSoftDelete)
+        ]
+    ]);
+    exit();
+}
+
+// =============================================
 // DEFAULT - Invalid action
 // =============================================
 else {
     echo json_encode([
         'success' => false,
-        'message' => 'Invalid action. Available: list, details, create, update, delete, toggle-availability, stats'
+        'message' => 'Invalid action. Available: list, details, create, update, delete, toggle-availability, stats, export, import, bulk-status, bulk-delete'
     ]);
     exit();
 }
-?>s
+?>
