@@ -390,7 +390,7 @@ try {
         ");
         $customers = $customersStmt->fetchAll(PDO::FETCH_ASSOC);
         
-        $driversStmt = $conn->query("SELECT id, full_name as name FROM drivers WHERE is_active = 1 ORDER BY full_name");
+        $driversStmt = $conn->query("SELECT id, full_name as name FROM delivery_drivers WHERE is_active = 1 ORDER BY full_name");
         $drivers = $driversStmt->fetchAll(PDO::FETCH_ASSOC);
         
         $statusCounts = [];
@@ -586,14 +586,14 @@ try {
         exit();
     }
     
-    // =============================================
+   // =============================================
     // 4. GET AVAILABLE DRIVERS
     // =============================================
     elseif ($method === 'GET' && $action === 'available-drivers') {
         checkPermission('view_drivers', $auth, $db);
         
         try {
-            $checkColumn = $conn->query("SHOW COLUMNS FROM drivers LIKE 'is_available'");
+            $checkColumn = $conn->query("SHOW COLUMNS FROM delivery_drivers LIKE 'is_available'");
             $hasIsAvailable = $checkColumn->rowCount() > 0;
         } catch (Exception $e) {
             $hasIsAvailable = false;
@@ -620,7 +620,7 @@ try {
                     d.id, d.full_name, d.email, d.phone, d.vehicle_type, 
                     d.license_plate, " . ($hasIsAvailable ? "d.is_available, " : "'1' as is_available, ") . "
                     COUNT(o.id) as current_orders
-                FROM drivers d
+                FROM delivery_drivers d
                 LEFT JOIN orders o ON o.driver_id = d.id AND o.status NOT IN ('delivered', 'cancelled')
                 $whereClause
                 GROUP BY d.id
@@ -1293,7 +1293,7 @@ try {
             exit();
         }
         
-        $checkDriver = $conn->prepare("SELECT id, full_name, is_active FROM drivers WHERE id = :id");
+        $checkDriver = $conn->prepare("SELECT id, full_name, is_active FROM delivery_drivers WHERE id = :id");
         $checkDriver->execute([':id' => $driverId]);
         $driver = $checkDriver->fetch(PDO::FETCH_ASSOC);
         
