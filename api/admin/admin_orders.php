@@ -353,7 +353,8 @@ try {
             o.created_at, o.updated_at, o.driver_id, o.promo_code_id, o.promo_discount,
             u.id as customer_id, u.full_name as customer_name, u.email as customer_email, u.phone as customer_phone,
             m.id as merchant_id, m.name as merchant_name, m.phone as merchant_phone,
-            d.full_name as driver_name, d.phone as driver_phone,
+            IFNULL(d.full_name, 'Unassigned') as driver_name, 
+            IFNULL(d.phone, '') as driver_phone,
             p.code as promo_code,
             (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
         FROM orders o
