@@ -347,23 +347,23 @@ try {
         $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
         
         $sql = "SELECT 
-                    o.id, o.order_number, o.status, o.subtotal, o.delivery_fee, 
-                    o.discount_amount, o.total_amount, o.payment_method, o.payment_status,
-                    o.delivery_address, o.special_instructions, o.cancellation_reason,
-                    o.created_at, o.updated_at, o.driver_id, o.promo_code_id, o.promo_discount,
-                    u.id as customer_id, u.full_name as customer_name, u.email as customer_email, u.phone as customer_phone,
-                    m.id as merchant_id, m.name as merchant_name, m.phone as merchant_phone,
-                    d.full_name as driver_name, d.phone as driver_phone,
-                    p.code as promo_code,
-                    (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
-                FROM orders o
-                LEFT JOIN users u ON o.user_id = u.id
-                LEFT JOIN merchants m ON o.merchant_id = m.id
-                LEFT JOIN drivers d ON o.driver_id = d.id
-                LEFT JOIN promo_codes p ON o.promo_code_id = p.id
-                $whereClause
-                ORDER BY o.created_at DESC
-                LIMIT :limit OFFSET :offset";
+            o.id, o.order_number, o.status, o.subtotal, o.delivery_fee, 
+            o.discount_amount, o.total_amount, o.payment_method, o.payment_status,
+            o.delivery_address, o.special_instructions, o.cancellation_reason,
+            o.created_at, o.updated_at, o.driver_id, o.promo_code_id, o.promo_discount,
+            u.id as customer_id, u.full_name as customer_name, u.email as customer_email, u.phone as customer_phone,
+            m.id as merchant_id, m.name as merchant_name, m.phone as merchant_phone,
+            d.full_name as driver_name, d.phone as driver_phone,
+            p.code as promo_code,
+            (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
+        FROM orders o
+        LEFT JOIN users u ON o.user_id = u.id
+        LEFT JOIN merchants m ON o.merchant_id = m.id
+        LEFT JOIN delivery_drivers d ON o.driver_id = d.id
+        LEFT JOIN promo_codes p ON o.promo_code_id = p.id
+        $whereClause
+        ORDER BY o.created_at DESC
+        LIMIT :limit OFFSET :offset";
         
         $stmt = $conn->prepare($sql);
         $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
@@ -436,7 +436,7 @@ try {
             FROM orders o
             LEFT JOIN users u ON o.user_id = u.id
             LEFT JOIN merchants m ON o.merchant_id = m.id
-            LEFT JOIN drivers d ON o.driver_id = d.id
+            LEFT JOIN delivery_drivers d ON o.driver_id = d.id
             LEFT JOIN promo_codes p ON o.promo_code_id = p.id
             WHERE o.id = :id
         ");
@@ -1347,7 +1347,7 @@ try {
         $checkOrder = $conn->prepare("
             SELECT o.id, o.status, o.driver_id, d.full_name as driver_name
             FROM orders o
-            LEFT JOIN drivers d ON o.driver_id = d.id
+            LEFT JOIN delivery_drivers d ON o.driver_id = d.id
             WHERE o.id = :id
         ");
         $checkOrder->execute([':id' => $orderId]);
@@ -1489,7 +1489,7 @@ try {
         exit();
     }
     
-    // =============================================
+   // =============================================
     // 19. BULK ASSIGN DRIVERS
     // =============================================
     elseif ($method === 'POST' && $action === 'bulk-assign-drivers') {
@@ -1503,9 +1503,11 @@ try {
         }
         
         $successCount = 0;
+        $failedAssignments = [];
         
-        foreach ($data['assignments'] as $assignment) {
+        foreach ($data['assignments'] as $index => $assignment) {
             if (empty($assignment['order_id']) || empty($assignment['driver_id'])) {
+                $failedAssignments[] = ['index' => $index, 'reason' => 'Missing order_id or driver_id'];
                 continue;
             }
             
@@ -1513,15 +1515,41 @@ try {
             $driverId = intval($assignment['driver_id']);
             
             try {
+                // Verify driver exists and is active in delivery_drivers table
+                $checkDriver = $conn->prepare("SELECT id FROM delivery_drivers WHERE id = :driver_id AND is_active = 1");
+                $checkDriver->execute([':driver_id' => $driverId]);
+                $driver = $checkDriver->fetch(PDO::FETCH_ASSOC);
+                
+                if (!$driver) {
+                    $failedAssignments[] = ['index' => $index, 'order_id' => $orderId, 'reason' => 'Driver not found or inactive'];
+                    continue;
+                }
+                
+                // Verify order exists
+                $checkOrder = $conn->prepare("SELECT id FROM orders WHERE id = :order_id");
+                $checkOrder->execute([':order_id' => $orderId]);
+                if (!$checkOrder->fetch()) {
+                    $failedAssignments[] = ['index' => $index, 'driver_id' => $driverId, 'reason' => 'Order not found'];
+                    continue;
+                }
+                
                 $updateStmt = $conn->prepare("UPDATE orders SET driver_id = :driver_id, updated_at = NOW() WHERE id = :order_id");
                 $updateStmt->execute([':driver_id' => $driverId, ':order_id' => $orderId]);
                 $successCount++;
             } catch (Exception $e) {
-                // Skip failed
+                $failedAssignments[] = ['index' => $index, 'reason' => $e->getMessage()];
             }
         }
         
-        echo json_encode(['success' => true, 'message' => "$successCount order(s) assigned"]);
+        echo json_encode([
+            'success' => true, 
+            'message' => "$successCount order(s) assigned successfully",
+            'data' => [
+                'success_count' => $successCount,
+                'failed_count' => count($failedAssignments),
+                'failed_assignments' => $failedAssignments
+            ]
+        ]);
         exit();
     }
     
